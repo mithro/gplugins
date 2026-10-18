@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 import numpy as np
@@ -74,6 +74,16 @@ def _edge(v) -> np.ndarray:
     )
 
 
+def _open_low(edge: float | None, lo: float) -> float | None:
+    """``None`` if a lower edge lies at or below the bound ``lo`` (within EDGE_TOL_UM)."""
+    return None if edge is not None and edge <= lo + EDGE_TOL_UM else edge
+
+
+def _open_high(edge: float | None, hi: float) -> float | None:
+    """``None`` if an upper edge lies at or above the bound ``hi`` (within EDGE_TOL_UM)."""
+    return None if edge is not None and edge >= hi - EDGE_TOL_UM else edge
+
+
 def _edge_expression(v: str) -> str:
     """:func:`_edge` as a DEVSIM expression (DEVSIM ``step(v)`` is 1 for v >= 0)."""
     tol = _num(EDGE_TOL_UM)
@@ -94,6 +104,19 @@ class DopingProfile:
         """The profile as a DEVSIM expression of the expressions ``x_um`` and ``y_um``."""
         raise NotImplementedError
 
+    def open_edges(
+        self, x_range: tuple[float, float], y_range: tuple[float, float]
+    ) -> DopingProfile:
+        """This profile with every sharp edge at or beyond the bounds removed (made open).
+
+        ``x_range`` and ``y_range`` are the (min, max) lateral position and depth (um) of the
+        region the profile is bound to. A sharp edge within ``EDGE_TOL_UM`` of a bound, or
+        beyond it, is dropped: a boundary node's control volume lies inside the region, so it
+        must get the full value, not the half of an interior edge. Smooth profiles are
+        returned unchanged. :func:`assign_doping` applies this with the region's bounds.
+        """
+        return self
+
     def __add__(self, other: DopingProfile) -> DopingProfile:
         return _Sum((self, other))
 
@@ -108,6 +131,9 @@ class _Sum(DopingProfile):
     def __call__(self, x_um, y_um) -> np.ndarray:
         return sum(t(x_um, y_um) for t in self.terms)
 
+    def open_edges(self, x_range, y_range) -> DopingProfile:
+        return _Sum(tuple(t.open_edges(x_range, y_range) for t in self.terms))
+
     def expression(self, x_um: str, y_um: str) -> str:
         return "(" + " + ".join(t.expression(x_um, y_um) for t in self.terms) + ")"
 
@@ -119,6 +145,9 @@ class _Product(DopingProfile):
     def __call__(self, x_um, y_um) -> np.ndarray:
         return math.prod(f(x_um, y_um) for f in self.factors)
 
+    def open_edges(self, x_range, y_range) -> DopingProfile:
+        return _Product(tuple(f.open_edges(x_range, y_range) for f in self.factors))
+
     def expression(self, x_um: str, y_um: str) -> str:
         return "(" + " * ".join(f.expression(x_um, y_um) for f in self.factors) + ")"
 
@@ -128,8 +157,10 @@ class Constant(DopingProfile):
     """``conc`` (cm^-3) for ``ymin < y < ymax`` (um, ``None`` = unbounded), else 0.
 
     The edges are tolerant half-value steps (:func:`_edge`): a point within ``EDGE_TOL_UM``
-    (1e-6 um) of ``ymin`` or ``ymax`` gets ``conc / 2``. Use ``None``, not the region boundary,
-    for a side that is not an edge (an edge on the region boundary halves the boundary nodes).
+    (1e-6 um) of ``ymin`` or ``ymax`` gets ``conc / 2``. That is exact for an interior edge on
+    a mesh line. An edge at or beyond a bound of the region the profile is bound to is open
+    (:meth:`DopingProfile.open_edges`, applied by :func:`assign_doping`), so a box that fills
+    the region gives every node, boundary nodes included, the full ``conc``.
     """
 
     conc: float
@@ -152,6 +183,13 @@ class Constant(DopingProfile):
         if self.ymax is not None:
             out += "*" + _edge_expression(f"{_num(self.ymax)} - {y_um}")
         return f"({out})"
+
+    def open_edges(self, x_range, y_range) -> Constant:
+        return replace(
+            self,
+            ymin=_open_low(self.ymin, y_range[0]),
+            ymax=_open_high(self.ymax, y_range[1]),
+        )
 
 
 @dataclass(frozen=True)
@@ -219,7 +257,8 @@ class Lateral(DopingProfile):
     For ``straggle > 0`` (um) this is the Gaussian lateral spread
     ``(erf((x - xmin)/(sqrt(2) s)) - erf((x - xmax)/(sqrt(2) s))) / 2``; for ``straggle == 0``
     the sharp window ``xmin < x < xmax``, with tolerant half-value edges as in :class:`Constant`
-    (1/2 within ``EDGE_TOL_UM`` = 1e-6 um of an edge). ``None`` leaves that side unbounded.
+    (1/2 within ``EDGE_TOL_UM`` = 1e-6 um of an edge, and open at a region bound, see
+    :meth:`DopingProfile.open_edges`). ``None`` leaves that side unbounded.
     """
 
     straggle: float
@@ -256,6 +295,15 @@ class Lateral(DopingProfile):
         lo = "1" if self.xmin is None else f"erf(({x_um} - {_num(self.xmin)})/{w})"
         hi = "(-1)" if self.xmax is None else f"erf(({x_um} - {_num(self.xmax)})/{w})"
         return f"(0.5*({lo} - {hi}))"
+
+    def open_edges(self, x_range, y_range) -> Lateral:
+        if self.straggle != 0:
+            return self  # a straggled (erf) edge is smooth
+        return replace(
+            self,
+            xmin=_open_low(self.xmin, x_range[0]),
+            xmax=_open_high(self.xmax, x_range[1]),
+        )
 
 
 def constant(
@@ -390,8 +438,9 @@ def profile_from_process(
     - ``DopingConstant``: :func:`constant` of ``peak_conc``. gdsfactory's frame is z-up and
       ``zmin``/``zmax`` are absolute z coordinates (um), with ``zmax=None`` meaning the top
       of the doped material. ``surface_z_um`` (required) is that top, and the depth window is
-      ``depth = surface_z_um - z``: ``ymin = surface_z_um - zmax`` (``None``, no edge, when
-      ``zmax=None`` or the box reaches the surface or above) and ``ymax = surface_z_um - zmin``.
+      ``depth = surface_z_um - z``: ``ymin = surface_z_um - zmax`` (0 for ``zmax=None``;
+      negative if the box reaches above the surface) and ``ymax = surface_z_um - zmin``. Edges
+      on the bounds of the region it is assigned to are open (:meth:`DopingProfile.open_edges`).
       A window that is empty (``zmax <= zmin``) or lies entirely at or above the surface
       (``zmin >= surface_z_um``) raises ``ValueError``, so it never silently gives no doping.
 
@@ -454,10 +503,10 @@ def _doping_constant_profile(step, surface_z_um: float | None) -> Constant:
             f"DopingConstant {step.name!r}: the window zmin={step.zmin!r}..zmax={zmax!r} lies "
             f"above the surface z={surface_z_um!r}"
         )
-    # a box reaching the surface has no edge there: the surface is the material boundary
-    ymin = surface_z_um - zmax
+    # an edge at or above the surface (ymin <= 0) is opened by assign_doping when the region's
+    # top is the surface, like any edge on a region bound
     return constant(
-        step.peak_conc, ymin=ymin if ymin > 0 else None, ymax=surface_z_um - step.zmin
+        step.peak_conc, ymin=surface_z_um - zmax, ymax=surface_z_um - step.zmin
     )
 
 
@@ -471,6 +520,38 @@ def _total(profiles: DopingProfile | Iterable[DopingProfile]) -> DopingProfile |
     if not profiles:
         return None
     return profiles[0] if len(profiles) == 1 else _Sum(profiles)
+
+
+def region_bounds(
+    device: str,
+    region: str,
+    *,
+    depth_axis: Literal["x", "y"] = "y",
+    surface_um: float = 0.0,
+    depth_sign: Literal[1, -1] = 1,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """``(x_range, y_range)`` (um) of a DEVSIM region in profile coordinates.
+
+    ``y_range`` is the (min, max) depth ``depth_sign * (coordinate_um - surface_um)`` of the
+    region's nodes along ``depth_axis`` and ``x_range`` the (min, max) of the other axis, the
+    same mapping (and arithmetic) as :func:`assign_doping`.
+    """
+    import devsim
+
+    lateral_axis = "y" if depth_axis == "x" else "x"
+    um = 1 / UM_TO_CM
+
+    def coord(axis: str) -> np.ndarray:
+        return np.array(
+            devsim.get_node_model_values(device=device, region=region, name=axis)
+        )
+
+    depth = depth_sign * (coord(depth_axis) * um - surface_um)
+    lat = coord(lateral_axis) * um
+    return (float(lat.min()), float(lat.max())), (
+        float(depth.min()),
+        float(depth.max()),
+    )
 
 
 def assign_doping(
@@ -490,6 +571,13 @@ def assign_doping(
     in cm. The depth of a node is ``depth_sign * (coordinate_um - surface_um)`` along
     ``depth_axis``; the lateral position is the other axis (``y`` is 0 on a 1D mesh, so a 1D
     device uses ``depth_axis="x"``). Existing models of those names are replaced.
+
+    The profiles are bound to the region first: the region's bounds along the profile axes
+    (the min and max lateral position and depth of its nodes) are passed to
+    :meth:`DopingProfile.open_edges`, so a sharp edge at or beyond a bound (within
+    ``EDGE_TOL_UM``) is open and only interior edges are half-value. The bounds are the
+    region's bounding box along those axes, so for a non-rectangular region only edges at its
+    extreme coordinates are opened.
     """
     import devsim
 
@@ -501,9 +589,20 @@ def assign_doping(
     um = _num(1 / UM_TO_CM)
     depth = f"({_num(depth_sign)}*({depth_axis}*{um} - {_num(surface_um)}))"
     x_um = f"({lateral_axis}*{um})"
+    x_range, y_range = region_bounds(
+        device,
+        region,
+        depth_axis=depth_axis,
+        surface_um=surface_um,
+        depth_sign=depth_sign,
+    )
     for name, profiles in (("Donors", donors), ("Acceptors", acceptors)):
         total = _total(profiles)
-        equation = "0" if total is None else total.expression(x_um, depth)
+        equation = (
+            "0"
+            if total is None
+            else total.open_edges(x_range, y_range).expression(x_um, depth)
+        )
         devsim.node_model(device=device, region=region, name=name, equation=equation)
     devsim.node_model(
         device=device, region=region, name="NetDoping", equation="Donors - Acceptors"
