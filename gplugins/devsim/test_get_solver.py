@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MIT
 """DEVSIM-only tests of gplugins.devsim.get_solver.DDComponent.
 
-The gmsh mesher behind DDComponent (``create_2Duz_simulation``) is being ported to meshwell 2.5
-and raises NotImplementedError, so these tests build small devices directly with DEVSIM's own
-mesher and hand them to DDComponent in its place.
+These tests build small devices directly with DEVSIM's own mesher and hand them to DDComponent
+in place of its gmsh mesher (``create_2Duz_simulation``, tested in tests/test_mesh.py), so each
+checks one solver behaviour on a hand-made mesh.
 """
 
 from __future__ import annotations
