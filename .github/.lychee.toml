@@ -55,6 +55,5 @@ exclude = [
 ]
 # Exclude paths that contain template variables or are known false positives
 exclude_path = [
-  ".github/release-drafter.yml",
   "CHANGELOG.md"
 ]
