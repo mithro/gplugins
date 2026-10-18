@@ -19,7 +19,7 @@ from gplugins.process import diffusion, implant_tables
 
 # --- gplugins.process.diffusion ------------------------------------------------------------
 
-# phosphorus 100 keV: Rp = 0.1227 um, straggle = 0.0442 um (implant_tables polynomials)
+# phosphorus 100 keV: Rp = 0.12445 um, straggle = 0.045268 um (implant_tables polynomials)
 _IMPLANT = dict(dopant="phosphorus", dose=1e13, E=100.0)
 _Z = np.linspace(0.0, 0.6, 6001)  # um
 
