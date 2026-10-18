@@ -6,6 +6,24 @@
 [![MIT](https://img.shields.io/github/license/gdsfactory/gplugins)](https://choosealicense.com/licenses/mit/)
 [![codecov](https://img.shields.io/codecov/c/github/gdsfactory/gplugins)](https://codecov.io/gh/gdsfactory/gdsfactory/tree/main/gplugins)
 
+## Fork for gf180-tcad
+
+This is [mithro/gplugins](https://github.com/mithro/gplugins), a fork of
+[gdsfactory/gplugins](https://github.com/gdsfactory/gplugins) maintained for
+[gf180-tcad](https://github.com/mithro/gf180-tcad), which compares TCAD
+against the PDK SPICE models for GF180MCU 5V devices. gf180-tcad consumes this
+fork as its `third_party/gplugins` git submodule and restores and extends the
+`gplugins.devsim` plugin here.
+
+- All work happens on `gf180/<task>` branches with pull requests inside this
+  fork (base `mithro/gplugins:main`).
+- Upstream (gdsfactory/gplugins) is **read-only** for this fork: no pushes,
+  pull requests, issues or comments are made there.
+- Fork CI runs only `Test code` (no secrets). The upstream workflows that
+  publish or need upstream secrets (`release.yml`, `release-drafter.yml`,
+  `pages.yml`) are deleted, because this fork never releases or publishes.
+- The fork keeps the upstream MIT licence.
+
 ## GDSFactory plugins
 
 Run simulations with GDSFactory by installing plugins.

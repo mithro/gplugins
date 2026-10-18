@@ -1,4 +1,9 @@
 name: Test code
+# mithro/gplugins fork (for gf180-tcad, https://github.com/mithro/gf180-tcad):
+# this is the fork's PR/main test workflow. It runs on GitHub-hosted runners
+# and passes no secrets or tokens to any step. gplugins/devsim is still excluded from the matrix
+# and from pytest (pyproject.toml norecursedirs) until gf180-tcad Phase 2
+# Task 4 adds a devsim job that runs in the pinned gf180-tcad TCAD image.
 
 on:
   pull_request:
@@ -16,8 +21,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
       - uses: pre-commit/action@v3.0.1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   test_code:
     runs-on: ${{ matrix.os }}
@@ -84,6 +87,10 @@ jobs:
           pytest gplugins/gmeep
 
   test_palace:
+    # Disabled in the mithro/gplugins fork: Palace (a full-wave EM solver) is irrelevant to
+    # gf180-tcad, and on a cold cache this job builds the Palace container from source for up to
+    # an hour on every PR. Upstream already marks it continue-on-error (it is not a reliable gate).
+    if: ${{ false }}
     runs-on: ubuntu-latest
     name: Test palace ubuntu-latest 3.11
     continue-on-error: true
@@ -148,8 +155,5 @@ jobs:
       - name: Test with pytest
         run: |
           make cov
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+      # mithro/gplugins fork: the Codecov upload is removed. It used the
+      # upstream CODECOV_TOKEN secret and publishes coverage to codecov.io.
