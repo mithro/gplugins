@@ -90,6 +90,10 @@ jobs:
           pytest gplugins/gmeep
 
   test_palace:
+    # Disabled in the mithro/gplugins fork: Palace (a full-wave EM solver) is irrelevant to
+    # gf180-tcad, and on a cold cache this job builds the Palace container from source for up to
+    # an hour on every PR. Upstream already marks it continue-on-error (it is not a reliable gate).
+    if: ${{ false }}
     runs-on: ubuntu-latest
     name: Test palace ubuntu-latest 3.11
     continue-on-error: true
