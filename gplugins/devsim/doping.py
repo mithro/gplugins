@@ -328,8 +328,13 @@ def profile_from_process(
       of ``ion`` at ``energy`` (keV) from ``gplugins.process.implant_tables``, and
       ``truncation`` as in :func:`gaussian_from_dose` (by default the dose in the material is
       the stated dose). A peak-specified ``ImplantGaussian`` keeps its peak;
-    - ``DopingConstant``: :func:`constant` of ``peak_conc`` with ``zmin``/``zmax`` taken as the
-      depth window (um below the surface).
+    - ``DopingConstant``: :func:`constant` of ``peak_conc``. gdsfactory's frame is z-up and
+      ``zmin``/``zmax`` are absolute z coordinates (um), with ``zmax=None`` meaning the top
+      of the doped material. ``surface_z_um`` (required) is that top, and the depth window is
+      ``depth = surface_z_um - z``: ``ymin = surface_z_um - zmax`` (0 for ``zmax=None``,
+      clipped to 0 if the box reaches above the surface) and ``ymax = surface_z_um - zmin``.
+      A window that is empty (``zmax <= zmin``) or lies entirely at or above the surface
+      (``zmin >= surface_z_um``) raises ``ValueError``, so it never silently gives no doping.
 
     With ``mask_um = (xmin, xmax)``, the profile is multiplied by :func:`lateral` for that
     opening, with the step's ``lateral_straggle`` (``ImplantGaussian``) or sharp edges.
@@ -365,12 +370,34 @@ def profile_from_process(
             truncation=truncation,
         )
     elif isinstance(step, DopingConstant):
-        profile = constant(step.peak_conc, ymin=step.zmin, ymax=step.zmax)
+        profile = _doping_constant_profile(step, surface_z_um)
     else:
         raise TypeError(f"not a doping step: {type(step).__name__}")
     if mask_um is not None:
         profile = profile * lateral(lateral_straggle, *mask_um)
     return kind, profile
+
+
+def _doping_constant_profile(step, surface_z_um: float | None) -> Constant:
+    """The depth window of a gdsfactory ``DopingConstant`` (z-up, absolute z, um)."""
+    if surface_z_um is None:
+        raise ValueError(
+            f"DopingConstant {step.name!r}: pass surface_z_um, the z (um) of the top of the "
+            "doped material; zmin/zmax are absolute z-up coordinates"
+        )
+    zmax = surface_z_um if step.zmax is None else step.zmax
+    if not zmax > step.zmin:
+        raise ValueError(
+            f"DopingConstant {step.name!r}: the window zmin={step.zmin!r}..zmax={zmax!r} is empty"
+        )
+    if not step.zmin < surface_z_um:
+        raise ValueError(
+            f"DopingConstant {step.name!r}: the window zmin={step.zmin!r}..zmax={zmax!r} lies "
+            f"above the surface z={surface_z_um!r}"
+        )
+    return constant(
+        step.peak_conc, ymin=max(0.0, surface_z_um - zmax), ymax=surface_z_um - step.zmin
+    )
 
 
 # --- DEVSIM ----------------------------------------------------------------------------------
