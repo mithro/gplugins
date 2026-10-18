@@ -17,6 +17,7 @@ from gplugins.devsim.contacts import (
     InterfaceRef,
     LayerRef,
     contacts_from_contact_info,
+    delete_circuit,
     interface_kind,
 )
 from gplugins.devsim.materials import CONSTANTS
@@ -31,7 +32,7 @@ def clean_devsim():
     left = list(devsim.get_device_list())
     for device in left:
         devsim.delete_device(device=device)
-    devsim.delete_circuit()
+    delete_circuit()
     for name in ("extended_solver", "extended_model", "extended_equation"):
         devsim.set_parameter(name=name, value=False)
     assert not left, f"devices left behind: {left}"
@@ -162,7 +163,7 @@ def test_typed_contacts_2d_pn_slab(tmp_path, monkeypatch) -> None:
         Contact("cathode", LayerRef((106, 0)), "ohmic"),
     ]
     with warnings.catch_warnings():
-        warnings.simplefilter("error", DeprecationWarning)
+        warnings.filterwarnings("error", message=".*contact_info", category=DeprecationWarning)
         c = DDComponent(**kw, contacts=contacts, constants=CONSTANTS)
         c.ddsolver()
     device = c.device

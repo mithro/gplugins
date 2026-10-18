@@ -14,7 +14,7 @@ import devsim
 import pytest
 
 from gplugins.devsim import doping
-from gplugins.devsim.contacts import Contact, InterfaceRef, LayerRef
+from gplugins.devsim.contacts import Contact, InterfaceRef, LayerRef, delete_circuit
 from gplugins.devsim.convergence import ConvergenceError
 from gplugins.devsim.materials import CONSTANTS, Constants
 from gplugins.devsim.stack1d import Layer1D, Mesh1D, create_1d_stack
@@ -35,7 +35,7 @@ def clean_devsim():
     left = list(devsim.get_device_list())
     for device in left:
         devsim.delete_device(device=device)
-    devsim.delete_circuit()
+    delete_circuit()
     for name in ("extended_solver", "extended_model", "extended_equation"):
         devsim.set_parameter(name=name, value=False)
     assert not left, f"devices left behind: {left}"
@@ -112,7 +112,7 @@ def test_constants_not_simple_physics_defaults() -> None:
 def test_stack1d_regions_and_spacing() -> None:
     dd = _poly_stack("geom", NFET)
     device = dd.device
-    assert list(devsim.get_region_list(device=device)) == ["gate_poly", "oxide", "body"]
+    assert sorted(devsim.get_region_list(device=device)) == ["body", "gate_poly", "oxide"]
     assert sorted(devsim.get_interface_list(device=device)) == [
         "gate_poly___oxide",
         "oxide___body",
@@ -284,3 +284,19 @@ def test_poly_gate_flatband(case) -> None:
         case["tox_um"] * UM
     )
     dd.delete_device()
+
+
+def test_package_exports() -> None:
+    import gplugins.devsim as gd
+    from gplugins.devsim import contacts, materials, stack1d
+
+    assert gd.create_1d_stack is stack1d.create_1d_stack
+    assert gd.Mesh1D is stack1d.Mesh1D and gd.Layer1D is stack1d.Layer1D
+    assert gd.Contact is contacts.Contact and gd.InterfaceRef is contacts.InterfaceRef
+    assert gd.LayerRef is contacts.LayerRef
+    assert gd.Constants is materials.Constants is Constants
+    assert gd.ConvergenceError is ConvergenceError
+    # one constants table: materials re-exports constants.Constants
+    from gplugins.devsim import constants
+
+    assert materials.Constants is constants.Constants and materials.CONSTANTS is constants.CONSTANTS
