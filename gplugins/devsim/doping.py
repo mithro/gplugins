@@ -16,6 +16,11 @@ positive into the semiconductor. The profiles are:
 - :func:`lateral`: a dimensionless mask-edge factor, the lateral spread of an implant through a
   mask opening ``[xmin, xmax]``, to multiply a vertical profile by.
 
+Sharp edges (:func:`constant` windows, :func:`lateral` with ``straggle=0``) are tolerant
+half-value steps: a point within ``EDGE_TOL_UM`` = 1e-6 um of an edge gets half the value, in
+both the numpy and the DEVSIM form. A node on an edge thus counts the same in every
+coordinate frame, and a box whose edges lie on mesh lines integrates exactly.
+
 Profiles add (``p1 + p2``) and multiply (``gaussian(...) * lateral(...)``). Each one also writes
 itself as a DEVSIM node-model expression, so :func:`assign_doping` creates the ``Donors``,
 ``Acceptors`` and ``NetDoping`` node models of a region as expressions of the node positions
@@ -48,6 +53,31 @@ DopantKind = Literal["donor", "acceptor"]
 def _num(value: float) -> str:
     """A float as a parenthesised DEVSIM literal (shortest round-trip repr)."""
     return f"({float(value)!r})"
+
+
+# Half-width (um) of the tolerant sharp edge, see _edge / _edge_expression.
+EDGE_TOL_UM = 1e-6
+
+
+def _edge(v) -> np.ndarray:
+    """Tolerant half-value step H(v) = (step(v + tol) + step(v - tol)) / 2, ``tol`` = EDGE_TOL_UM.
+
+    H is 1 for v > tol, 0 for v < -tol and exactly 1/2 for |v| <= tol. A node that lies on a
+    sharp edge (|v| <= 1e-6 um, far above the last-bit rounding of the depth arithmetic) so
+    gets half the value whatever the coordinate frame, and the node-volume integral of a box
+    whose edges lie on mesh lines is exact.
+    """
+    v = np.asarray(v, dtype=float)
+    return 0.5 * (
+        np.where(v + EDGE_TOL_UM >= 0, 1.0, 0.0)
+        + np.where(v - EDGE_TOL_UM >= 0, 1.0, 0.0)
+    )
+
+
+def _edge_expression(v: str) -> str:
+    """:func:`_edge` as a DEVSIM expression (DEVSIM ``step(v)`` is 1 for v >= 0)."""
+    tol = _num(EDGE_TOL_UM)
+    return f"(0.5*(step(({v}) + {tol}) + step(({v}) - {tol})))"
 
 
 class DopingProfile:
@@ -95,7 +125,12 @@ class _Product(DopingProfile):
 
 @dataclass(frozen=True)
 class Constant(DopingProfile):
-    """``conc`` (cm^-3) for ``ymin <= y <= ymax`` (um, ``None`` = unbounded), else 0."""
+    """``conc`` (cm^-3) for ``ymin < y < ymax`` (um, ``None`` = unbounded), else 0.
+
+    The edges are tolerant half-value steps (:func:`_edge`): a point within ``EDGE_TOL_UM``
+    (1e-6 um) of ``ymin`` or ``ymax`` gets ``conc / 2``. Use ``None``, not the region boundary,
+    for a side that is not an edge (an edge on the region boundary halves the boundary nodes).
+    """
 
     conc: float
     ymin: float | None = None
@@ -103,20 +138,19 @@ class Constant(DopingProfile):
 
     def __call__(self, x_um, y_um) -> np.ndarray:
         y = np.asarray(y_um, dtype=float)
-        inside = np.ones_like(y, dtype=bool)
+        out = self.conc + 0.0 * y + 0.0 * np.asarray(x_um, dtype=float)
         if self.ymin is not None:
-            inside &= y >= self.ymin
+            out = out * _edge(y - self.ymin)
         if self.ymax is not None:
-            inside &= y <= self.ymax
-        return np.where(inside, self.conc, 0.0) + 0.0 * np.asarray(x_um, dtype=float)
+            out = out * _edge(self.ymax - y)
+        return out
 
     def expression(self, x_um: str, y_um: str) -> str:
         out = _num(self.conc)
-        # DEVSIM step(v) is 1 for v >= 0, matching the closed window above
         if self.ymin is not None:
-            out += f"*step({y_um} - {_num(self.ymin)})"
+            out += "*" + _edge_expression(f"{y_um} - {_num(self.ymin)}")
         if self.ymax is not None:
-            out += f"*step({_num(self.ymax)} - {y_um})"
+            out += "*" + _edge_expression(f"{_num(self.ymax)} - {y_um}")
         return f"({out})"
 
 
@@ -184,7 +218,8 @@ class Lateral(DopingProfile):
 
     For ``straggle > 0`` (um) this is the Gaussian lateral spread
     ``(erf((x - xmin)/(sqrt(2) s)) - erf((x - xmax)/(sqrt(2) s))) / 2``; for ``straggle == 0``
-    the sharp window ``xmin <= x <= xmax``. ``None`` leaves that side of the opening unbounded.
+    the sharp window ``xmin < x < xmax``, with tolerant half-value edges as in :class:`Constant`
+    (1/2 within ``EDGE_TOL_UM`` = 1e-6 um of an edge). ``None`` leaves that side unbounded.
     """
 
     straggle: float
@@ -198,12 +233,12 @@ class Lateral(DopingProfile):
     def __call__(self, x_um, y_um) -> np.ndarray:
         x = np.asarray(x_um, dtype=float) + 0.0 * np.asarray(y_um, dtype=float)
         if self.straggle == 0:
-            inside = np.ones_like(x, dtype=bool)
+            out = np.ones_like(x)
             if self.xmin is not None:
-                inside &= x >= self.xmin
+                out = out * _edge(x - self.xmin)
             if self.xmax is not None:
-                inside &= x <= self.xmax
-            return np.where(inside, 1.0, 0.0)
+                out = out * _edge(self.xmax - x)
+            return out
         w = math.sqrt(2) * self.straggle
         lo = 1.0 if self.xmin is None else special.erf((x - self.xmin) / w)
         hi = -1.0 if self.xmax is None else special.erf((x - self.xmax) / w)
@@ -213,9 +248,9 @@ class Lateral(DopingProfile):
         if self.straggle == 0:
             out = "1"
             if self.xmin is not None:
-                out += f"*step({x_um} - {_num(self.xmin)})"
+                out += "*" + _edge_expression(f"{x_um} - {_num(self.xmin)}")
             if self.xmax is not None:
-                out += f"*step({_num(self.xmax)} - {x_um})"
+                out += "*" + _edge_expression(f"{_num(self.xmax)} - {x_um}")
             return f"({out})"
         w = _num(math.sqrt(2) * self.straggle)
         lo = "1" if self.xmin is None else f"erf(({x_um} - {_num(self.xmin)})/{w})"
@@ -226,7 +261,10 @@ class Lateral(DopingProfile):
 def constant(
     conc: float, ymin: float | None = None, ymax: float | None = None
 ) -> Constant:
-    """Uniform ``conc`` (cm^-3), optionally only for depths ``ymin <= y <= ymax`` (um)."""
+    """Uniform ``conc`` (cm^-3), optionally only for depths ``ymin < y < ymax`` (um).
+
+    Points on an edge (within 1e-6 um) get ``conc / 2``; see :class:`Constant`.
+    """
     return Constant(conc=conc, ymin=ymin, ymax=ymax)
 
 
@@ -352,8 +390,8 @@ def profile_from_process(
     - ``DopingConstant``: :func:`constant` of ``peak_conc``. gdsfactory's frame is z-up and
       ``zmin``/``zmax`` are absolute z coordinates (um), with ``zmax=None`` meaning the top
       of the doped material. ``surface_z_um`` (required) is that top, and the depth window is
-      ``depth = surface_z_um - z``: ``ymin = surface_z_um - zmax`` (0 for ``zmax=None``,
-      clipped to 0 if the box reaches above the surface) and ``ymax = surface_z_um - zmin``.
+      ``depth = surface_z_um - z``: ``ymin = surface_z_um - zmax`` (``None``, no edge, when
+      ``zmax=None`` or the box reaches the surface or above) and ``ymax = surface_z_um - zmin``.
       A window that is empty (``zmax <= zmin``) or lies entirely at or above the surface
       (``zmin >= surface_z_um``) raises ``ValueError``, so it never silently gives no doping.
 
@@ -416,10 +454,10 @@ def _doping_constant_profile(step, surface_z_um: float | None) -> Constant:
             f"DopingConstant {step.name!r}: the window zmin={step.zmin!r}..zmax={zmax!r} lies "
             f"above the surface z={surface_z_um!r}"
         )
+    # a box reaching the surface has no edge there: the surface is the material boundary
+    ymin = surface_z_um - zmax
     return constant(
-        step.peak_conc,
-        ymin=max(0.0, surface_z_um - zmax),
-        ymax=surface_z_um - step.zmin,
+        step.peak_conc, ymin=ymin if ymin > 0 else None, ymax=surface_z_um - step.zmin
     )
 
 
