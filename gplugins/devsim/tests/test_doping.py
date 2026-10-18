@@ -153,7 +153,9 @@ def test_profiles_hand_values() -> None:
     )  # erfc(1)
     c = doping.constant(1.7e17, ymin=0.1, ymax=0.3)
     np.testing.assert_array_equal(
-        c(0.0, np.array([0.05, 0.1, 0.2, 0.3, 0.35])), [0, 1.7e17, 1.7e17, 1.7e17, 0]
+        # a point exactly on an edge gets half the concentration
+        c(0.0, np.array([0.05, 0.1, 0.2, 0.3, 0.35])),
+        [0, 0.85e17, 1.7e17, 0.85e17, 0],
     )
     lat = doping.lateral(straggle=0.05, xmin=0.0, xmax=1.0)
     assert lat(0.0, 0.0) == pytest.approx(0.5, rel=1e-12)  # at a mask edge
@@ -192,15 +194,14 @@ def test_gaussian_from_dose() -> None:
     [
         doping.gaussian(peak=3e18, depth=0.15, straggle=0.04),
         doping.erfc(surface=1e20, length=0.08),
-        # box edges off the 0.05 um mesh lines: at a node exactly on a sharp edge, the
-        # included/excluded decision depends on last-ulp rounding of the depth arithmetic
-        doping.constant(1.7e17, ymin=0.12, ymax=0.43),
+        # box edges on the 0.05 um mesh lines: the edge nodes get half the concentration
+        doping.constant(1.7e17, ymin=0.1, ymax=0.4),
         doping.gaussian(peak=1e18, depth=0.2, straggle=0.05)
         * doping.lateral(0.05, xmin=0.0, xmax=1.0),
         doping.lateral(0.05, xmin=0.2) * doping.gaussian(1e18, 0.3, 0.1),
         doping.lateral(0.05, xmax=0.5) * doping.constant(1e17),
         doping.lateral(0.0, xmin=0.0) * doping.constant(1e16),
-        doping.lateral(0.0, xmax=0.5) * doping.constant(1e16, ymax=0.47),
+        doping.lateral(0.0, xmax=0.5) * doping.constant(1e16, ymax=0.5),
         doping.gaussian(1e18, 0.3, 0.1)
         + doping.erfc(1e19, 0.1)
         + doping.constant(1e15),
@@ -303,7 +304,7 @@ def test_dose_conserved(clean_devsim) -> None:
         layer=None,
         ion="B",
         peak_conc=1e16,
-        zmin=-1.0,
+        zmin=-0.6,
         zmax=0.0,
         into_materials=["si"],
     )
@@ -366,7 +367,7 @@ def test_dose_conserved(clean_devsim) -> None:
         (
             "DopingConstant",
             *doping.profile_from_process(dc, surface_z_um=0.0),
-            1e16 * 1e-4,
+            1e16 * 0.6e-4,
         ),
     ]
     d = _device_1d("d_dose", length_um=1.0, ps_um=5e-4)
@@ -432,19 +433,21 @@ def test_doping_constant_frame() -> None:
     # the gdsfactory-style substrate box zmin=-1, zmax=0 under a surface at z = 0
     kind, p = doping.profile_from_process(_doping_constant(-1.0, 0.0), surface_z_um=0.0)
     assert kind == "acceptor"
-    assert (p.ymin, p.ymax) == (0.0, 1.0)
+    # a box reaching the surface has no upper edge there (ymin None), so the surface nodes get
+    # the full concentration; the edge at depth 1 gets half
+    assert (p.ymin, p.ymax) == (None, 1.0)
     np.testing.assert_array_equal(
-        p(0.0, np.array([0.0, 0.5, 1.0, 1.01])), [1e17, 1e17, 1e17, 0]
+        p(0.0, np.array([0.0, 0.5, 1.0, 1.01])), [1e17, 1e17, 0.5e17, 0]
     )
     # zmax=None means the surface (the top of the doped material)
     _, p = doping.profile_from_process(_doping_constant(-0.5, None), surface_z_um=0.2)
-    assert (p.ymin, p.ymax) == (0.0, pytest.approx(0.7))
+    assert (p.ymin, p.ymax) == (None, pytest.approx(0.7))
     # a box below the surface
     _, p = doping.profile_from_process(_doping_constant(-0.6, -0.2), surface_z_um=0.0)
     assert (p.ymin, p.ymax) == (0.2, 0.6)
     # a box straddling the surface is clipped to it
     _, p = doping.profile_from_process(_doping_constant(-0.5, 0.3), surface_z_um=0.0)
-    assert (p.ymin, p.ymax) == (0.0, 0.5)
+    assert (p.ymin, p.ymax) == (None, 0.5)
 
 
 @pytest.mark.parametrize(
@@ -481,6 +484,80 @@ def test_erfc_from_junction() -> None:
     for bad in (1e20, 2e20, 0.0, -1.0):
         with pytest.raises(ValueError, match="background"):
             doping.erfc_from_junction(surface=1e20, xj=0.2, background=bad)
+
+
+# the two frames of the 2D test device (y = -1..0 um): depth = -y and depth = y + 1
+_FRAMES_2D = [(-1, 0.0), (1, -1.0)]
+
+
+@pytest.mark.parametrize(
+    ("depth_sign", "surface_um"), _FRAMES_2D, ids=["y-up", "y-down"]
+)
+def test_box_on_mesh_lines_dose_2d(clean_devsim, depth_sign, surface_um) -> None:
+    """A box whose edges lie on mesh lines integrates to its nominal dose, in either frame."""
+    d = _device_2d("d_box2", ps_um=0.05)
+    doping.assign_doping(
+        d,
+        "si",
+        acceptors=[doping.constant(1.0, ymin=0.1, ymax=0.4)],
+        depth_axis="y",
+        surface_um=surface_um,
+        depth_sign=depth_sign,
+    )
+    expected = 1.0 * 0.3 * 3.0 * UM * UM  # conc x depth window x width (cm^2)
+    got = _integral(d, "Acceptors")
+    print(
+        f"2D on-mesh box, frame {depth_sign:+d}/{surface_um}: rel error {got / expected - 1!r}"
+    )
+    assert got == pytest.approx(expected, rel=1e-9)
+
+
+@pytest.mark.parametrize(
+    ("depth_sign", "surface_um"), [(1, 0.0), (-1, 1.0)], ids=["x-down", "x-up"]
+)
+def test_box_on_mesh_lines_dose_1d(clean_devsim, depth_sign, surface_um) -> None:
+    """The same in 1D (0..1 um, 0.05 um mesh), with depth = x and depth = 1 - x."""
+    d = _device_1d("d_box1", length_um=1.0, ps_um=0.05)
+    doping.assign_doping(
+        d,
+        "si",
+        acceptors=[doping.constant(1.0, ymin=0.1, ymax=0.4)],
+        depth_axis="x",
+        surface_um=surface_um,
+        depth_sign=depth_sign,
+    )
+    expected = 1.0 * 0.3 * UM
+    got = _integral(d, "Acceptors")
+    print(
+        f"1D on-mesh box, frame {depth_sign:+d}/{surface_um}: rel error {got / expected - 1!r}"
+    )
+    assert got == pytest.approx(expected, rel=1e-9)
+
+
+def test_frames_give_same_node_values(clean_devsim) -> None:
+    """Both 2D frames give the same value at every (x, depth), with sharp edges on mesh lines."""
+    profile = doping.constant(1.7e17, ymin=0.1, ymax=0.4) * doping.lateral(
+        0.0, xmin=0.0, xmax=1.0
+    ) + doping.gaussian(1e18, 0.3, 0.1) * doping.lateral(0.0, xmax=0.5)
+    by_frame = []
+    for i, (depth_sign, surface_um) in enumerate(_FRAMES_2D):
+        d = _device_2d(f"d_frame{i}", ps_um=0.05)
+        doping.assign_doping(
+            d,
+            "si",
+            donors=[profile],
+            depth_axis="y",
+            surface_um=surface_um,
+            depth_sign=depth_sign,
+        )
+        depth = depth_sign * (_values(d, "y") * 1e4 - surface_um)
+        keys = zip(np.round(_values(d, "x") * 1e4, 9), np.round(depth, 9) + 0.0)
+        by_frame.append(dict(zip(keys, _values(d, "Donors"))))
+    assert by_frame[0].keys() == by_frame[1].keys()
+    a = np.array([by_frame[0][k] for k in sorted(by_frame[0])])
+    b = np.array([by_frame[1][k] for k in sorted(by_frame[0])])
+    np.testing.assert_allclose(a, b, rtol=1e-12, atol=0.0)
+    assert (a == 0.5 * 1.7e17).any()  # some nodes do lie on an edge
 
 
 def _solve_equilibrium_poisson(device: str, region: str, c=CONSTANTS) -> np.ndarray:
