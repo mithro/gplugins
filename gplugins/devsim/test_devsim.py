@@ -35,6 +35,11 @@ DEPLETION_WIDTH_RTOL = 1e-6
 # gf180-tcad docs/limitations/plugin-history.md, "All recorded currents are below the solver's
 # current floor"). They are solver noise. This floor checks that they are still noise on the
 # latest stack and that no real current appeared.
+# Measured on the latest stack (gf180-tcad TCAD image: devsim 2.11.1, Python 3.13.16), total
+# (electron + hole) A/cm, bit-identical to v0.8.0.json:
+#   0 V:  left 1.778368790494735e-15,  right 4.4879986596680306e-15
+#   -1 V: left -1.0420928010546398e-15, right 4.895919713614902e-15
+# The depletion widths are bit-identical to v0.8.0 too (difference 0), well inside the 1e-6.
 CURRENT_FLOOR_A_PER_CM = 1e-13
 
 
