@@ -1,9 +1,8 @@
 name: Test code
 # mithro/gplugins fork (for gf180-tcad, https://github.com/mithro/gf180-tcad):
 # this is the fork's PR/main test workflow. It runs on GitHub-hosted runners
-# and passes no secrets or tokens to any step. gplugins/devsim is still excluded from the matrix
-# and from pytest (pyproject.toml norecursedirs) until gf180-tcad Phase 2
-# Task 4 adds a devsim job that runs in the pinned gf180-tcad TCAD image.
+# and passes no secrets or tokens to any step. gplugins/devsim is not in the matrix: the
+# test_devsim job runs it inside the pinned gf180-tcad TCAD image instead.
 
 on:
   pull_request:
@@ -57,6 +56,50 @@ jobs:
       - name: Test capacitance wrapper
         if: ${{ matrix.plugin == 'elmer' }}
         run: uv run pytest gplugins/common/utils/tests/test_get_capacitance.py
+
+  test_devsim:
+    # gplugins.devsim runs inside the pinned gf180-tcad TCAD image (devsim 2.11.1,
+    # gdsfactory 9.51.0, meshwell 2.5.2, gmsh 4.15.2, Python 3.13), so this job uses exactly
+    # gf180-tcad's locked environment and resolves no packages. The digest is gf180-tcad's
+    # docker/TCAD_IMAGE, and the `docker run` settings reproduce gf180-tcad tools/sandbox-run
+    # (lines 101-125), both at gf180-tcad commit 3c386f95ff2955be6367bd5ec7c66298b812a4fe.
+    # Left out: the gf180-tcad.slice cgroup parent and the --memory/--cpus/--pids-limit limits
+    # (host resource guards; --cpus 8 exceeds a hosted runner's 4 CPUs), and the read-only
+    # gf180-tcad mount at /work/src. PYTHON_CPU_COUNT=1 comes from the image.
+    runs-on: ubuntu-latest
+    name: Test devsim (gf180-tcad TCAD image)
+    env:
+      TCAD_IMAGE: ghcr.io/mithro/gf180-tcad-tcad@sha256:5d8a681220fed79000f0aeecd0aa979452d919decdd3e7604cc17415a733e9a8
+    steps:
+      - name: Free disk space
+        # the image is ~15 GB unpacked
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune --all --force
+          df -h /
+      - uses: actions/checkout@v7
+      - name: Pull the TCAD image by digest
+        run: |
+          docker pull --quiet "$TCAD_IMAGE"
+          docker image inspect "$TCAD_IMAGE" --format 'id={{.Id}} size={{.Size}}'
+          df -h /
+      - name: Test with pytest
+        run: |
+          docker run --rm \
+            --entrypoint "" \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --network none \
+            --read-only --tmpfs /tmp:rw,size=1g,exec \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp/home -e USER=gf180tcad -e LOGNAME=gf180tcad -e PYTHONPATH=/work/out \
+            -e OMP_NUM_THREADS=1 -e OPENBLAS_NUM_THREADS=1 -e MKL_NUM_THREADS=1 \
+            -e "NPY_DISABLE_CPU_FEATURES=X86_V3 X86_V4 AVX512_ICL AVX512_SPR" \
+            -e GF180TCAD_IN_SANDBOX=1 \
+            -v "$GITHUB_WORKSPACE:/work/out:rw" --workdir /work/out \
+            "$TCAD_IMAGE" \
+            sh -c 'mkdir -p "$HOME" && exec "$@"' -- \
+            python -m pytest -p no:cacheprovider gplugins/devsim -m "not tidy3d" -v
 
   test_meep:
     runs-on: ubuntu-latest
