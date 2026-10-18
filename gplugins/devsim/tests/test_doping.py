@@ -205,6 +205,11 @@ def test_gaussian_from_dose() -> None:
         doping.gaussian(1e18, 0.3, 0.1)
         + doping.erfc(1e19, 0.1)
         + doping.constant(1e15),
+        # sharp edges on the region bounds (depth 0 and 1, x = -1 and 2) are open
+        doping.constant(1e16, ymin=0.0, ymax=1.0)
+        * doping.lateral(0.0, xmin=-1.0, xmax=2.0),
+        doping.constant(1e16, ymin=0.0, ymax=0.4)
+        * doping.lateral(0.0, xmin=-1.0, xmax=0.5),
     ],
     ids=[
         "gaussian",
@@ -216,6 +221,8 @@ def test_gaussian_from_dose() -> None:
         "sharp-xmin-only",
         "sharp-xmax-only",
         "sum",
+        "box-filling-region",
+        "box-one-edge-on-region-bound",
     ],
 )
 @pytest.mark.parametrize(
@@ -246,7 +253,8 @@ def test_devsim_expression_equals_python(
     assert depth.min() == pytest.approx(
         0.0, abs=1e-12
     ) and depth.max() == pytest.approx(1.0)
-    expected = profile(x_um, depth)
+    # assign_doping opens the sharp edges that lie on the region bounds
+    expected = profile.open_edges((-1.0, 2.0), (0.0, 1.0))(x_um, depth)
     np.testing.assert_allclose(
         _values(d, "Donors"), expected, rtol=1e-12, atol=1e-30 * expected.max()
     )
@@ -304,7 +312,7 @@ def test_dose_conserved(clean_devsim) -> None:
         layer=None,
         ion="B",
         peak_conc=1e16,
-        zmin=-0.6,
+        zmin=-1.0,
         zmax=0.0,
         into_materials=["si"],
     )
@@ -365,9 +373,18 @@ def test_dose_conserved(clean_devsim) -> None:
             1e17 * np.sqrt(2 * np.pi) * 0.1e-4 * _in_silicon(0.4, 0.1),
         ),
         (
-            "DopingConstant",
+            # both edges on the region bounds (depth 0 and 1 um)
+            "DopingConstant filling the region",
             *doping.profile_from_process(dc, surface_z_um=0.0),
-            1e16 * 0.6e-4,
+            1e16 * 1e-4,
+        ),
+        (
+            # zmax=None: the surface edge on the region bound, the bottom edge interior
+            "DopingConstant zmax=None",
+            *doping.profile_from_process(
+                _doping_constant(-0.6, None), surface_z_um=0.0
+            ),
+            1e17 * 0.6e-4,
         ),
     ]
     d = _device_1d("d_dose", length_um=1.0, ps_um=5e-4)
@@ -433,21 +450,22 @@ def test_doping_constant_frame() -> None:
     # the gdsfactory-style substrate box zmin=-1, zmax=0 under a surface at z = 0
     kind, p = doping.profile_from_process(_doping_constant(-1.0, 0.0), surface_z_um=0.0)
     assert kind == "acceptor"
-    # a box reaching the surface has no upper edge there (ymin None), so the surface nodes get
-    # the full concentration; the edge at depth 1 gets half
-    assert (p.ymin, p.ymax) == (None, 1.0)
+    assert (p.ymin, p.ymax) == (0.0, 1.0)
+    # on its own a point on an edge gets half; bound to a region 0..1 um both edges are open
     np.testing.assert_array_equal(
-        p(0.0, np.array([0.0, 0.5, 1.0, 1.01])), [1e17, 1e17, 0.5e17, 0]
+        p(0.0, np.array([0.0, 0.5, 1.0, 1.01])), [0.5e17, 1e17, 0.5e17, 0]
     )
+    q = p.open_edges((0.0, 0.0), (0.0, 1.0))
+    assert (q.ymin, q.ymax) == (None, None)
     # zmax=None means the surface (the top of the doped material)
     _, p = doping.profile_from_process(_doping_constant(-0.5, None), surface_z_um=0.2)
-    assert (p.ymin, p.ymax) == (None, pytest.approx(0.7))
+    assert (p.ymin, p.ymax) == (0.0, pytest.approx(0.7))
     # a box below the surface
     _, p = doping.profile_from_process(_doping_constant(-0.6, -0.2), surface_z_um=0.0)
     assert (p.ymin, p.ymax) == (0.2, 0.6)
-    # a box straddling the surface is clipped to it
+    # a box straddling the surface: its upper edge lies above it (beyond any region bound)
     _, p = doping.profile_from_process(_doping_constant(-0.5, 0.3), surface_z_um=0.0)
-    assert (p.ymin, p.ymax) == (None, 0.5)
+    assert (p.ymin, p.ymax) == (pytest.approx(-0.3), 0.5)
 
 
 @pytest.mark.parametrize(
@@ -558,6 +576,117 @@ def test_frames_give_same_node_values(clean_devsim) -> None:
     b = np.array([by_frame[1][k] for k in sorted(by_frame[0])])
     np.testing.assert_allclose(a, b, rtol=1e-12, atol=0.0)
     assert (a == 0.5 * 1.7e17).any()  # some nodes do lie on an edge
+
+
+def test_open_edges() -> None:
+    """open_edges drops the sharp edges at or beyond the given bounds (within EDGE_TOL_UM)."""
+    tol = doping.EDGE_TOL_UM
+    c = doping.constant(1.0, ymin=0.0, ymax=1.0).open_edges(
+        (0.0, 0.0), (0.5 * tol, 1.0 - 0.5 * tol)
+    )
+    assert (c.ymin, c.ymax) == (None, None)
+    c = doping.constant(1.0, ymin=0.0, ymax=1.0).open_edges((0.0, 0.0), (-1.0, 2.0))
+    assert (c.ymin, c.ymax) == (0.0, 1.0)  # inside the bounds: kept
+    c = doping.constant(1.0, ymin=-0.3, ymax=0.4).open_edges((0.0, 0.0), (0.0, 1.0))
+    assert (c.ymin, c.ymax) == (None, 0.4)  # beyond the bound: open
+    lat = doping.lateral(0.0, xmin=-1.0, xmax=0.5).open_edges((-1.0, 2.0), (0.0, 1.0))
+    assert (lat.xmin, lat.xmax) == (None, 0.5)
+    smooth = doping.lateral(0.05, xmin=-1.0).open_edges((-1.0, 2.0), (0.0, 1.0))
+    assert smooth.xmin == -1.0  # a straggled edge is not sharp: unchanged
+    g = doping.gaussian(1e18, 0.3, 0.1)
+    assert g.open_edges((-1.0, 2.0), (0.0, 1.0)) is g
+
+
+@pytest.mark.parametrize(
+    ("depth_sign", "surface_um"), [(1, 0.0), (-1, 1.0)], ids=["x-down", "x-up"]
+)
+@pytest.mark.parametrize(
+    ("ymin", "ymax"),
+    [(0.0, 1.0), (0.0, 0.4), (0.4, 1.0)],
+    ids=["filling", "edge-at-top-bound", "edge-at-bottom-bound"],
+)
+def test_box_on_region_bounds_1d(
+    clean_devsim, depth_sign, surface_um, ymin, ymax
+) -> None:
+    """Box edges on the 1D region bounds are open: full conc at the boundary nodes, exact dose."""
+    d = _device_1d("d_rb1", length_um=1.0, ps_um=0.05)
+    doping.assign_doping(
+        d,
+        "si",
+        acceptors=[doping.constant(1.0, ymin=ymin, ymax=ymax)],
+        depth_axis="x",
+        surface_um=surface_um,
+        depth_sign=depth_sign,
+    )
+    values = _values(d, "Acceptors")
+    depth = depth_sign * (_values(d, "x") * 1e4 - surface_um)
+    for bound in (0.0, 1.0):
+        if abs(bound - ymin) < 1e-9 or abs(bound - ymax) < 1e-9:
+            at = np.abs(depth - bound) < 1e-9
+            assert at.sum() == 1 and values[at][0] == 1.0, (bound, values[at])
+    got = _integral(d, "Acceptors")
+    expected = (ymax - ymin) * UM
+    print(
+        f"1D region-bound box {ymin}..{ymax}, frame {depth_sign:+d}: rel error {got / expected - 1!r}"
+    )
+    assert got == pytest.approx(expected, rel=1e-9)
+
+
+@pytest.mark.parametrize(
+    ("depth_sign", "surface_um"), _FRAMES_2D, ids=["y-up", "y-down"]
+)
+@pytest.mark.parametrize(
+    ("profile", "area_um2"),
+    [
+        (doping.constant(1.0, ymin=0.0, ymax=1.0), 3.0),
+        (doping.constant(1.0, ymin=0.0, ymax=0.4), 1.2),
+        (
+            doping.constant(1.0, ymin=0.4, ymax=1.0)
+            * doping.lateral(0.0, xmin=-1.0, xmax=2.0),
+            1.8,
+        ),
+        (
+            doping.constant(1.0, ymin=0.0, ymax=1.0)
+            * doping.lateral(0.0, xmin=-1.0, xmax=0.5),
+            1.5,
+        ),
+        (
+            doping.constant(1.0, ymin=0.0, ymax=0.4)
+            * doping.lateral(0.0, xmin=0.5, xmax=2.0),
+            0.6,
+        ),
+    ],
+    ids=[
+        "filling",
+        "edge-at-surface",
+        "lateral-filling",
+        "lateral-xmin-bound",
+        "corner",
+    ],
+)
+def test_box_on_region_bounds_2d(
+    clean_devsim, depth_sign, surface_um, profile, area_um2
+) -> None:
+    """In 2D, edges on the region bounds are open too, in both frames: the dose is exact."""
+    d = _device_2d("d_rb2", ps_um=0.05)
+    doping.assign_doping(
+        d,
+        "si",
+        acceptors=[profile],
+        depth_axis="y",
+        surface_um=surface_um,
+        depth_sign=depth_sign,
+    )
+    got = _integral(d, "Acceptors")
+    expected = area_um2 * UM * UM
+    print(
+        f"2D region-bound box, frame {depth_sign:+d}: rel error {got / expected - 1!r}"
+    )
+    assert got == pytest.approx(expected, rel=1e-9)
+    if (
+        area_um2 == 3.0
+    ):  # fills the region: every node, boundary nodes included, has full conc
+        np.testing.assert_array_equal(_values(d, "Acceptors"), 1.0)
 
 
 def _solve_equilibrium_poisson(device: str, region: str, c=CONSTANTS) -> np.ndarray:
