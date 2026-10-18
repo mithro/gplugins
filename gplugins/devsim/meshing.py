@@ -16,6 +16,12 @@ meshwell's ``pre_2d_hook``, after the last re-initialisation and right before
 ``generate(2)``. It pins ``Mesh.RandomSeed`` and turns every gmsh thread option to 1, so the
 mesh does not depend on ``PYTHON_CPU_COUNT`` or the host's core count.
 
+It mirrors meshwell 2.5.2 ``meshwell/orchestrator.py`` lines 219-266 (``generate_mesh``: the
+``CADSettings``, ``cad`` call, ``ModelManager`` set-up, ``Geometry.OCCBoundsUseStl``,
+``load_occ_entities`` and ``mesh`` call), and imports the semi-internal
+``meshwell.occ_xao_writer.default_interface_aabb_tolerance`` as that code does. Re-sync it with
+``generate_mesh`` on every meshwell upgrade.
+
 The mesh is written as MSH 2.2, which DEVSIM reads. Physical groups are named by meshwell:
 the entity names (``a``), the interfaces between two entities (``a___b``) and the exterior
 boundary of an entity (``a___None``).

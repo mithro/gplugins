@@ -31,7 +31,8 @@ jobs:
         os: [ubuntu-latest]
         python-version: [3.12]
         # The extras that use meshwell (femwell, meshwell, elmer) need meshwell 2.5, which
-        # needs Python >= 3.13 (on older Python, femwell's own dependency resolves meshwell 2.1).
+        # needs Python >= 3.13 (on older Python, femwell's own unpinned dependency resolves
+        # meshwell 2.3.6, which lacks meshwell.orchestrator.cad).
         include:
           - plugin: femwell
             os: ubuntu-latest
