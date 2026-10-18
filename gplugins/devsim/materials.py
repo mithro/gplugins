@@ -11,7 +11,15 @@ mu = 400 / 200 cm^2/(V s), are never called.
 
 The bulk equations are DEVSIM's ``simple_physics`` models (Boltzmann statistics, constant
 mobility, SRH recombination), which read only the region parameters set here. DEVSIM works
-in cm.
+in cm. The ohmic-contact and initial carrier densities are simple_physics'
+``1e-10 + 0.5*abs(NetDoping + sqrt(NetDoping^2 + 4 n_i^2))`` (cm^-3): the ``1e-10`` floor only
+keeps them positive and is negligible against n_i.
+
+Boltzmann statistics is approximate in a degenerate poly gate: at 1e20 (n+) and 3.6e19 (p+)
+the gate's Fermi level lies past the band edge, so the Boltzmann flat band (-1.029 / +1.003 V
+for the gf180-tcad MOSCAPs) differs from the degenerate one (the gf180-tcad Phase 2 plan
+estimates about 40 mV on Vfb). This is a documented limitation of gf180-tcad
+(https://github.com/mithro/gf180-tcad/tree/main/docs/limitations, Task 13a).
 
 Region classes: a region is ``"silicon"`` (Poisson + drift-diffusion; a poly-silicon gate is
 silicon too), ``"oxide"`` (Poisson only) or ``None`` (no equations, e.g. a metal electrode).

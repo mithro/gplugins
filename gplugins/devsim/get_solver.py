@@ -149,15 +149,19 @@ class DDComponent:
         """
         if contacts is not None and contact_info:
             raise ValueError("pass contacts or contact_info, not both")
-        if contacts is None:
-            if contact_info is not None:
-                warnings.warn(
-                    "DDComponent(contact_info=...) is deprecated and solves with gplugins "
-                    "v0.8.0's physics; pass contacts=[gplugins.devsim.contacts.Contact(...)] "
-                    "and constants=gplugins.devsim.materials.Constants()",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
+        if contacts is None and contact_info is None:
+            raise ValueError(
+                "pass contacts=[gplugins.devsim.contacts.Contact(...)] (or the deprecated "
+                "contact_info dict); neither was given"
+            )
+        if contacts is None:  # contact_info given: the deprecated gplugins v0.8.0 path
+            warnings.warn(
+                "DDComponent(contact_info=...) is deprecated and solves with gplugins "
+                "v0.8.0's physics; pass contacts=[gplugins.devsim.contacts.Contact(...)] "
+                "and constants=gplugins.devsim.materials.Constants()",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             self.legacy = True
             default_constants = SIMPLE_PHYSICS_V080
         else:
@@ -178,7 +182,7 @@ class DDComponent:
         self.temp_file_name = temp_file_name
         self.devsim_mesh_name = devsim_mesh_name
         self.devsim_device_name = devsim_device_name
-        self.devsim_simulation_filename = (devsim_simulation_filename,)
+        self.devsim_simulation_filename = devsim_simulation_filename
         self.atol = atol
         self.rtol = rtol
         self.max_iter = max_iter
@@ -225,7 +229,7 @@ class DDComponent:
         self.temp_file_name = None
         self.devsim_mesh_name = mesh
         self.devsim_device_name = device
-        self.devsim_simulation_filename = (None,)
+        self.devsim_simulation_filename = None
         self.atol = atol
         self.rtol = rtol
         self.max_iter = max_iter
@@ -314,6 +318,16 @@ class DDComponent:
             for v, ni, pi, di in zip(values("NodeVolume"), values(n), values(p), values("NetDoping"))
         )
 
+    def electrode_charge(self, contact: str, regions: Sequence[str]) -> float:
+        """The charge (C/cm^2 in 1D) of the electrode at ``contact``.
+
+        DEVSIM's contact charge of ``contact`` plus the space charge of ``regions``, the
+        semiconductor regions on that electrode's side of the insulator (e.g. the poly gate).
+        For a metal gate on oxide ``regions`` is empty. In a neutral device, by Gauss, the gate
+        electrode's charge equals the oxide D field and minus the body electrode's charge.
+        """
+        return self.contact_charge(contact) + math.fsum(self.region_charge(r) for r in regions)
+
     def ac_admittance(self, contact: str, frequency_hz: float) -> complex:
         """Small-signal admittance Y = I/V (A/cm^2 per V in 1D) of a ``circuit=True`` contact.
 
@@ -331,6 +345,9 @@ class DDComponent:
                     value=1.0 if c.name == contact else 0.0,
                 )
         try:
+            # The small-signal AC solve is a single linear solve around the converged DC point
+            # (DEVSIM has no Newton iteration and no convergence info for it), so it is called
+            # directly rather than through convergence.solve_dc.
             devsim_solve(type="ac", frequency=float(frequency_hz))
             node = f"{contacts_mod.source_name(contact)}.I"
             current = complex(

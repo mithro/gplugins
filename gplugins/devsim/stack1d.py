@@ -12,6 +12,11 @@ Names: the regions are the layer names, the interface between layers ``a`` and `
 ``a___b``, and the contacts are the :class:`~gplugins.devsim.contacts.Contact` names. A 1D
 DEVSIM mesh has exactly two contacts, one at each end; each is ``InterfaceRef(<end layer>,
 None)``. DEVSIM works in cm: positions are cm, a charge is C/cm^2 and a capacitance F/cm^2.
+
+Statistics are Boltzmann (:mod:`gplugins.devsim.materials`). In a degenerate poly gate
+(1e20 n+, 3.6e19 p+) the Fermi level lies past the band edge, so Boltzmann is approximate
+there: the gf180-tcad Phase 2 plan estimates about 40 mV on Vfb, a documented gf180-tcad
+limitation (https://github.com/mithro/gf180-tcad/tree/main/docs/limitations, Task 13a).
 """
 
 from __future__ import annotations
@@ -73,12 +78,17 @@ class Mesh1D:
     """Node spacing (um) per layer: ``{layer: (at its first face, at its last face)}``.
 
     Inside a layer the spacing is graded geometrically from the first to the second value
-    (a constant ratio between neighbouring spacings).
+    (a constant ratio between neighbouring spacings). ``max_ratio`` (> 1) bounds the ratio of
+    any two neighbouring spacings, inside a layer (more, finer intervals are used) and across
+    a layer boundary (:func:`create_1d_stack` raises if the requested spacings jump more).
     """
 
     spacing_um: Mapping[str, tuple[float, float]]
+    max_ratio: float = 1.25
 
     def __post_init__(self) -> None:
+        if not (self.max_ratio > 1 and math.isfinite(self.max_ratio)):
+            raise ValueError(f"Mesh1D.max_ratio must be > 1, got {self.max_ratio!r}")
         spacing = {}
         for name, pair in dict(self.spacing_um).items():
             h0, h1 = (float(v) for v in pair)
@@ -88,22 +98,29 @@ class Mesh1D:
         object.__setattr__(self, "spacing_um", spacing)
 
 
-def graded_spacings(length: float, h0: float, h1: float) -> list[float]:
+def graded_spacings(
+    length: float, h0: float, h1: float, max_ratio: float = 1.25
+) -> list[float]:
     """Spacings (same unit as the arguments) that fill ``length``, graded from ``h0`` to ``h1``.
 
-    The fewest n intervals h_i = s h0 (h1/h0)^(i/(n-1)) whose unscaled sum reaches ``length``,
-    scaled by s <= 1 to fill it exactly. So no spacing exceeds the requested one at its
-    position, the neighbour ratio is constant, and only a layer thinner than min(h0, h1) gets a
-    single interval (``length``).
+    The fewest n intervals h_i = s h0 (h1/h0)^(i/(n-1)) whose unscaled sum reaches ``length``
+    and whose neighbour ratio (h1/h0)^(1/(n-1)) is within ``max_ratio``, scaled by s <= 1 to
+    fill it exactly. So no spacing exceeds the requested one at its position, the neighbour
+    ratio is constant and at most ``max_ratio``, and only a layer thinner than min(h0, h1)
+    gets a single interval (``length``).
     """
+    log_max = math.log(max_ratio)
 
     def unscaled(n: int) -> list[float]:
         if n == 1:
             return [min(h0, h1)]
         return [h0 * (h1 / h0) ** (i / (n - 1)) for i in range(n)]
 
+    def too_steep(n: int) -> bool:
+        return n > 1 and abs(math.log(h1 / h0)) / (n - 1) > log_max * (1 + 1e-12)
+
     n = 1
-    while math.fsum(unscaled(n)) < length:
+    while math.fsum(unscaled(n)) < length or too_steep(n):
         n += 1
     hs = unscaled(n)
     s = length / math.fsum(hs)
@@ -192,12 +209,22 @@ def create_1d_stack(
     bounds = [0.0]
     for layer in layers:
         bounds.append(bounds[-1] + layer.thickness_um)
+    spacings = [
+        graded_spacings(layer.thickness_um, *mesh.spacing_um[layer.name], mesh.max_ratio)
+        for layer in layers
+    ]
+    for i in range(1, len(layers)):
+        a, b = spacings[i - 1][-1], spacings[i][0]
+        if max(a / b, b / a) > mesh.max_ratio * (1 + 1e-12):
+            raise ValueError(
+                f"the spacing jumps from {a!r} um ({layers[i - 1].name}) to {b!r} um "
+                f"({layers[i].name}), a ratio above Mesh1D.max_ratio = {mesh.max_ratio!r}"
+            )
     xs: list[float] = [0.0]
     boundary_node = [0]
     for i, layer in enumerate(layers):
-        h0, h1 = mesh.spacing_um[layer.name]
         x = bounds[i]
-        for h in graded_spacings(layer.thickness_um, h0, h1)[:-1]:
+        for h in spacings[i][:-1]:
             x += h
             xs.append(x)
         xs.append(bounds[i + 1])
