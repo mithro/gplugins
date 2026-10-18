@@ -44,7 +44,15 @@ dev = [
   "pytest-cov",
   "pytest_regressions"
 ]
-devsim = ["devsim", "pyvista<=0.49.1", "tidy3d>=2.11.1,<2.13.0"]
+# meshwell 2.5 (the devsim mesher) needs Python >= 3.13. tidy3d and pyvista are only for
+# PINWaveguide.make_waveguide (mode solves) and plot/list_fields.
+devsim = [
+  "devsim>=2.11.1; python_version >= '3.13'",
+  "meshwell~=2.5; python_version >= '3.13'",
+  "pyvista<=0.49.1",
+  "scipy",
+  "tidy3d>=2.11.1,<2.13.0"
+]
 docs = [
   "jupyter",
   "jupytext",
@@ -90,9 +98,11 @@ reportUnusedExpression = false
 
 [tool.pytest.ini_options]
 addopts = "--assert=plain"
+markers = [
+  "tidy3d: needs the tidy3d extra (deselect with -m 'not tidy3d')"
+]
 norecursedirs = [
   "extra/*.py",
-  'gplugins/devsim',
   'gplugins/sax/integrations',
   'gplugins/tidy3d/tests/tests_sparameters',
   'gplugins/fdtdz',
@@ -241,3 +251,11 @@ showcontent = true
 directory = "fixed"
 name = "Fixed"
 showcontent = true
+
+[tool.uv]
+# The devsim extra needs meshwell 2.5; elmer, femwell and meshwell pin meshwell 2.1.
+conflicts = [
+  [{ extra = "devsim" }, { extra = "elmer" }],
+  [{ extra = "devsim" }, { extra = "femwell" }],
+  [{ extra = "devsim" }, { extra = "meshwell" }]
+]

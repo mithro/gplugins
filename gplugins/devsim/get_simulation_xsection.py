@@ -16,18 +16,18 @@ from typing import TYPE_CHECKING
 import devsim
 import matplotlib.pyplot as plt
 import numpy as np
-import pyvista as pv
-import tidy3d as td
 from devsim.python_packages import model_create, simple_physics
 from pydantic import BaseModel, ConfigDict
 from scipy.interpolate import griddata
 
 from gplugins.common.utils.disable_print import DisablePrint
-from gplugins.tidy3d.materials import get_nk
-from gplugins.tidy3d.modes import Precision, Waveguide
 
+# tidy3d (make_waveguide) and pyvista (plot, list_fields) are imported where they are used, so
+# that the DEVSIM solver imports and runs without them.
 if TYPE_CHECKING:
     from gdsfactory.typings import MaterialSpec
+
+    from gplugins.tidy3d.modes import Precision, Waveguide
 
 nm = 1e-9
 um = 1e-6
@@ -460,6 +460,8 @@ class PINWaveguide(BaseModel):
             cmap: color map.
             jupyter_backend: for the jupyter notebook.
         """
+        import pyvista as pv
+
         devsim.write_devices(file=tempfile, type="tecplot")
         reader = pv.get_reader(tempfile)
         mesh = reader.read()
@@ -475,6 +477,8 @@ class PINWaveguide(BaseModel):
 
     def list_fields(self, tempfile="temp.dat"):
         """Returns the header of the mesh, which lists all possible fields."""
+        import pyvista as pv
+
         devsim.write_devices(file=tempfile, type="tecplot")
         reader = pv.get_reader(tempfile)
         mesh = reader.read()
@@ -515,6 +519,11 @@ class PINWaveguide(BaseModel):
             A tidy3d Waveguide object.
 
         """
+        import tidy3d as td
+
+        from gplugins.tidy3d.materials import get_nk
+        from gplugins.tidy3d.modes import Waveguide
+
         if not perturb:
             # Create simple waveguide, handle like regular mode
             return Waveguide(

@@ -10,6 +10,7 @@ from devsim import (
     get_edge_model_list,
     get_edge_model_values,
     get_interface_list,
+    get_node_model_list,
     get_node_model_values,
     get_region_list,
     set_node_values,
@@ -21,7 +22,6 @@ from devsim.python_packages import model_create, simple_physics
 from gdsfactory.component import Component
 from gdsfactory.pdk import get_layer_stack
 from gdsfactory.technology import LayerStack
-from pydantic import Extra
 
 from gplugins.devsim.doping import (
     DopingLayerLevel,
@@ -139,11 +139,6 @@ class DDComponent:
         if extended_precision:
             self.set_extended_precision()
 
-    class Config:
-        """Enable adding new."""
-
-        extra = Extra.allow
-
     def set_extended_precision(self) -> None:
         set_parameter(name="extended_solver", value=True)
         set_parameter(name="extended_model", value=True)
@@ -213,23 +208,41 @@ class DDComponent:
             resolutions=self.resolutions,
             mesh_scaling_factor=self.mesh_scaling_factor,
             background_tag=self.background_tag,
+            temp_file_name=self.temp_file_name,
+            devsim_mesh_name=self.devsim_mesh_name,
+            devsim_device_name=self.devsim_device_name,
             global_meshsize_array=global_meshsize_array,
         )
         device = self.device
 
-        for region in get_region_list(device=device):
+        # The silicon models need NetDoping, so they apply only to the regions that have it,
+        # and the silicon/silicon interface model only to interfaces between two of them.
+        # create_2Duz_simulation sets NetDoping on the "si" regions and (to 0) on the contact
+        # regions, which are solved as intrinsic silicon as in v0.8.0; other regions (e.g.
+        # oxide) have none and get no silicon model.
+        silicon = [
+            r
+            for r in get_region_list(device=device)
+            if "NetDoping" in get_node_model_list(device=device, region=r)
+        ]
+
+        for region in silicon:
             self.set_parameters(device=device, region=region)
 
-        for region in get_region_list(device=device):
+        for region in silicon:
             self.initial_solution(device=device, region=region)
 
-        for region in get_region_list(device=device):
+        for region in silicon:
             self.drift_diffusion_initial_solution(device=device, region=region)
 
         for interface in get_interface_list(device=device):
-            simple_physics.CreateSiliconSiliconInterface(
-                device=device, interface=interface
-            )
+            if all(
+                r in silicon
+                for r in get_region_list(device=device, interface=interface)
+            ):
+                simple_physics.CreateSiliconSiliconInterface(
+                    device=device, interface=interface
+                )
 
         self.save_device("debug.dat")
 
@@ -323,7 +336,7 @@ class DDComponent:
     def delete_device(self) -> None:
         """Delete this devsim device and mesh."""
         delete_mesh(mesh=self.devsim_mesh_name)
-        delete_device(device=self.devsim_mesh_name)
+        delete_device(device=self.device)
 
     def get_refined_mesh(
         self,
@@ -356,23 +369,23 @@ class DDComponent:
         refine = {}
 
         # Refined regions
-        for regiontype, region_names in c.regions.items():
+        for regiontype, region_names in self.regions.items():
             for regionname in region_names:
                 if regiontype in refine_regions:
                     xs[regionname] = np.array(
-                        c.get_mean_edge_from_node_field(regionname, "x")
+                        self.get_mean_edge_from_node_field(regionname, "x")
                     )
                     ys[regionname] = np.array(
-                        c.get_mean_edge_from_node_field(regionname, "y")
+                        self.get_mean_edge_from_node_field(regionname, "y")
                     )
-                    lcs[regionname] = c.get_edge_field(
+                    lcs[regionname] = self.get_edge_field(
                         regionname, field_name="EdgeLength"
                     )
-                    node_index = c.get_node_index(region_name=regionname)
+                    node_index = self.get_node_index(region_name=regionname)
 
                     refinements = []
                     for field_name, refinement in refine_dict.items():
-                        field = np.array(c.get_node_field(regionname, field_name))
+                        field = np.array(self.get_node_field(regionname, field_name))
                         refinements.append(
                             np.array(
                                 [
