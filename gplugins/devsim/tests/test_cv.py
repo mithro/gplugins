@@ -290,27 +290,29 @@ def _device_2d(name: str) -> DDComponent:
     y < 0.1 um) under the gate's edge."""
     mesh = f"{name}_mesh"
     devsim.create_2d_mesh(mesh=mesh)
-    for pos, ps, ns in ((0.0, 0.01, 0.01), (0.2, 0.004, 0.004), (1.0, 0.05, 0.05)):
+    # DEVSIM's 2D mesher makes a contact where its region meets another one, so the device is
+    # surrounded by an equation-free "air" margin (as DEVSIM's testing/mos_2d_create.py).
+    m = 0.01  # um
+    for pos, ps, ns in ((-m, m, m), (0.0, 0.01, 0.01), (0.2, 0.004, 0.004), (1.0, 0.05, 0.05), (1.0 + m, m, m)):
         devsim.add_2d_mesh_line(mesh=mesh, dir="x", pos=pos * UM, ps=ps * UM, ns=ns * UM)
     for pos, ps, ns in (
+        (-TOX_2D_UM - m, m, m),
         (-TOX_2D_UM, 0.004, 0.004),
         (0.0, 0.0005, 0.002),
         (0.1, 0.004, 0.004),
         (1.0, 0.1, 0.1),
+        (1.0 + m, m, m),
     ):
         devsim.add_2d_mesh_line(mesh=mesh, dir="y", pos=pos * UM, ps=ps * UM, ns=ns * UM)
-    devsim.add_2d_region(mesh=mesh, material="oxide", region="oxide", xl=0.0, xh=UM, yl=-TOX_2D_UM * UM, yh=0.0)
-    devsim.add_2d_region(mesh=mesh, material="silicon", region="si", xl=0.0, xh=UM, yl=0.0, yh=UM)
-    devsim.add_2d_interface(
-        mesh=mesh, name="oxide___si", region0="oxide", region1="si", xl=0.0, xh=UM, yl=0.0, yh=0.0, bloat=1e-10
-    )
     y_top = -TOX_2D_UM * UM
+    devsim.add_2d_region(mesh=mesh, material="air", region="air")
+    devsim.add_2d_region(mesh=mesh, material="oxide", region="oxide", xl=0.0, xh=UM, yl=y_top, yh=0.0)
+    devsim.add_2d_region(mesh=mesh, material="silicon", region="si", xl=0.0, xh=UM, yl=0.0, yh=UM)
+    devsim.add_2d_interface(mesh=mesh, name="oxide___si", region0="oxide", region1="si")
+    devsim.add_2d_contact(mesh=mesh, name="gate", region="oxide", material="metal", yl=y_top, yh=y_top)
+    devsim.add_2d_contact(mesh=mesh, name="body", region="si", material="metal", yl=UM, yh=UM)
     devsim.add_2d_contact(
-        mesh=mesh, name="gate", region="oxide", material="metal", xl=0.0, xh=UM, yl=y_top, yh=y_top, bloat=1e-10
-    )
-    devsim.add_2d_contact(mesh=mesh, name="body", region="si", material="metal", xl=0.0, xh=UM, yl=UM, yh=UM, bloat=1e-10)
-    devsim.add_2d_contact(
-        mesh=mesh, name="side", region="si", material="metal", xl=0.0, xh=0.0, yl=0.0, yh=0.1 * UM, bloat=1e-10
+        mesh=mesh, name="side", region="si", material="metal", xl=0.0, xh=0.0, yl=0.0, yh=0.1 * UM
     )
     devsim.finalize_mesh(mesh=mesh)
     devsim.create_device(mesh=mesh, device=name)
@@ -328,7 +330,7 @@ def _device_2d(name: str) -> DDComponent:
     return DDComponent.from_device(
         device=name,
         mesh=mesh,
-        region_classes={"oxide": "oxide", "si": "silicon"},
+        region_classes={"air": None, "oxide": "oxide", "si": "silicon"},
         contacts=contacts,
         constants=CONSTANTS,
         atol=1e10,
@@ -390,3 +392,26 @@ def test_ac_refuses_foreign_circuit() -> None:
         sweep_cv(dd, "gate", [0.0], method="ac", freq_hz=1.0)
     dd.delete_device()
     other.delete_device()
+
+
+def test_package_exports() -> None:
+    import gplugins.devsim as gd
+    from gplugins.devsim import cv
+    from gplugins.devsim.convergence import ConvergenceError
+
+    assert gd.sweep_cv is cv.sweep_cv and gd.CVResult is cv.CVResult
+    assert gd.PointInfo is cv.PointInfo and gd.CVConvergenceError is cv.CVConvergenceError
+    assert issubclass(CVConvergenceError, ConvergenceError)
+
+
+def test_abs_tol_continues_newton() -> None:
+    """A tighter abs_tol makes Newton continue until the potential update meets it."""
+    dd = _poly_stack("abstol", NFET)
+    loose = sweep_cv(dd, "gate", [-1.0, 2.0], method="qs")
+    tight = sweep_cv(dd, "gate", [-1.0, 2.0], method="qs", abs_tol=1e-20)
+    for a, b in zip(loose.points, tight.points):
+        print(f"abs_tol 1e-12: {a}; abs_tol 1e-20: {b}")
+        assert b.abs_error <= 1e-20 and b.iterations > a.iterations
+    for ca, cb in zip(loose.cgg, tight.cgg):
+        assert abs(cb / ca - 1) <= 1e-9
+    dd.delete_device()

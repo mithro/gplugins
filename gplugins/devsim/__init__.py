@@ -16,6 +16,7 @@ try:
     )
     from gplugins.devsim.contacts import Contact, InterfaceRef, LayerRef
     from gplugins.devsim.convergence import ConvergenceError
+    from gplugins.devsim.cv import CVConvergenceError, CVResult, PointInfo, sweep_cv
     from gplugins.devsim.get_solver import DDComponent
     from gplugins.devsim.materials import CONSTANTS, Constants
     from gplugins.devsim.stack1d import Layer1D, Mesh1D, create_1d_stack
@@ -36,6 +37,8 @@ logger.info(f"DEVSIM {tcad.__version__!r} installed at {tcad.__path__!r}")
 
 __all__ = [
     "CONSTANTS",
+    "CVConvergenceError",
+    "CVResult",
     "Constants",
     "Contact",
     "ConvergenceError",
@@ -45,11 +48,13 @@ __all__ = [
     "LayerRef",
     "Mesh1D",
     "PINWaveguide",
+    "PointInfo",
     "alpha_to_k",
     "clear_devsim_cache",
     "create_1d_stack",
     "dalpha_carriers",
     "dn_carriers",
     "k_to_alpha",
+    "sweep_cv",
 ]
 __version__ = "0.0.1"
