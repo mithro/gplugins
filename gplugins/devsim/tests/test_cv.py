@@ -160,6 +160,21 @@ def test_ac_inversion_is_hf(case) -> None:
         )
         assert cq > 0.7 * c0  # QS recovers towards Cox in inversion (poly depletion aside)
         assert 0.0 < ca < 0.7 * cq
+    # HF inversion is pinned: flat between +3 and +5 V (pol*vg) and at the
+    # depletion-approximation Cmin = (1/Cox + W_max/eps_si)^-1, with
+    # W_max = sqrt(2 eps_si (2 psi_B) / (q N)), psi_B = V_t ln(N/n_i) (Sze & Ng ch. 4,
+    # https://doi.org/10.1002/0470068329).
+    eps_si = CONSTANTS.eps_si * CONSTANTS.eps0_f_per_cm
+    psi_b = CONSTANTS.vt_v * math.log(N_BODY / CONSTANTS.n_i_cm3)
+    w_max = math.sqrt(2 * eps_si * 2 * psi_b / (CONSTANTS.q_c * N_BODY))
+    c_min = 1 / (1 / c0 + w_max / eps_si)
+    print(
+        f"{case['name']}: W_max {w_max / UM:.5f} um, Cmin {c_min / c0:.6f} Cox; AC "
+        f"{ac.cgg[0] / c0:.6f}, {ac.cgg[1] / c0:.6f} Cox"
+    )
+    assert abs(ac.cgg[1] / ac.cgg[0] - 1) <= 0.01
+    for ca in ac.cgg:
+        assert abs(ca / c_min - 1) <= 0.05
     dd.delete_device()
 
 
@@ -414,4 +429,66 @@ def test_abs_tol_continues_newton() -> None:
         assert b.abs_error <= 1e-20 and b.iterations > a.iterations
     for ca, cb in zip(loose.cgg, tight.cgg):
         assert abs(cb / ca - 1) <= 1e-9
+    dd.delete_device()
+
+
+# --------------------------------------------------------------------------------------------
+# Fix round 1: error paths
+# --------------------------------------------------------------------------------------------
+def test_standalone_circuit_refused() -> None:
+    """A standalone (device-less) circuit element makes an AC sweep raise ValueError; the
+    device and that circuit are left as they were."""
+    devsim.circuit_element(name="R_standalone", n1="n_standalone", n2="0", value=1e3)
+    dd = _poly_stack("standalone", NFET)
+    before = _state(dd)
+    with pytest.raises(ValueError, match="pre-existing"):
+        sweep_cv(dd, "gate", [0.0], method="ac", freq_hz=1e3)
+    assert _state(dd) == before
+    assert "n_standalone" in devsim.get_circuit_node_list()  # not deleted by the sweep
+    dd.delete_device()
+
+
+def test_post_check_needs_potential_equation() -> None:
+    """The per-equation post-check never passes vacuously: no PotentialEquation, no pass."""
+    from gplugins.devsim import cv
+    from gplugins.devsim.convergence import ConvergenceError
+
+    info = {"iterations": [{"devices": [{"name": "d", "regions": [{"name": "r", "equations": []}]}]}]}
+    with pytest.raises(ConvergenceError, match="PotentialEquation"):
+        cv._errors(info, "d")
+    with pytest.raises(ConvergenceError, match="PotentialEquation"):
+        cv._errors({"iterations": [{"devices": []}]}, "d")
+
+
+def test_unreachable_abs_tol_raises() -> None:
+    dd = _poly_stack("abs300", NFET)
+    with pytest.raises(CVConvergenceError, match="not at the requested tolerances") as err:
+        sweep_cv(dd, "gate", [-1.0], method="qs", abs_tol=1e-300, max_iterations=12)
+    assert err.value.points == [-1.0]
+    dd.delete_device()
+
+
+@pytest.mark.parametrize("method", ["qs", "ac"])
+def test_own_circuit_contact_refused(method) -> None:
+    layers = [Layer1D("ox_a", "oxide", 0.0076, None), Layer1D("ox_b", "oxide", 0.0076, None)]
+    contacts = [
+        Contact("top", InterfaceRef("ox_a", None), "gate", circuit=True),
+        Contact("bot", InterfaceRef("ox_b", None), "gate"),
+    ]
+    dd = create_1d_stack(
+        f"own_{method}", layers, contacts, Mesh1D({"ox_a": (0.001, 0.001), "ox_b": (0.001, 0.001)}), CONSTANTS
+    )
+    kw = {"freq_hz": 1.0} if method == "ac" else {}
+    with pytest.raises(ValueError, match="circuit=False"):
+        sweep_cv(dd, "top", [0.0], method=method, **kw)
+    dd.delete_device()
+
+
+def test_duplicate_vg_reasons_kept() -> None:
+    dd = _poly_stack("dupvg", NFET)
+    with pytest.raises(CVConvergenceError) as err:
+        sweep_cv(dd, "gate", [2.0, 2.0], method="qs", rel_tol=1e-16, max_iterations=2)
+    assert err.value.points == [2.0, 2.0]
+    assert [(i, v) for i, v, _ in err.value.reasons] == [(0, 2.0), (1, 2.0)]
+    assert all(reason for _, _, reason in err.value.reasons)
     dd.delete_device()
