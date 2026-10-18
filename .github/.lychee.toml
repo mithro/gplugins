@@ -50,6 +50,12 @@ exclude = [
   # Optica blocks automated crawlers; DOIs in the 10.1364 prefix redirect there
   "https://opg.optica.org/.*",
   "https://doi.org/10.1364/.*",
+  # Wiley and AIP Publishing answer automated crawlers with 403; DOIs in the 10.1002 (Wiley)
+  # and 10.1063 (AIP) prefixes redirect there (physics citations in gplugins/devsim/constants.py)
+  "https://onlinelibrary.wiley.com/.*",
+  "https://doi.org/10.1002/.*",
+  "https://pubs.aip.org/.*",
+  "https://doi.org/10.1063/.*",
   # srim.org is intermittently unreachable and times out
   "http://www.srim.org/.*"
 ]
