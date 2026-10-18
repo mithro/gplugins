@@ -10,6 +10,7 @@ from devsim import (
     get_edge_model_list,
     get_edge_model_values,
     get_interface_list,
+    get_node_model_list,
     get_node_model_values,
     get_region_list,
     set_node_values,
@@ -214,11 +215,15 @@ class DDComponent:
         )
         device = self.device
 
-        # The silicon models apply only to the silicon regions (material "si", the regions
-        # create_2Duz_simulation dopes), and the silicon/silicon interface model only to
-        # interfaces between two of them; other regions (e.g. oxide) have no NetDoping.
+        # The silicon models need NetDoping, so they apply only to the regions that have it,
+        # and the silicon/silicon interface model only to interfaces between two of them.
+        # create_2Duz_simulation sets NetDoping on the "si" regions and (to 0) on the contact
+        # regions, which are solved as intrinsic silicon as in v0.8.0; other regions (e.g.
+        # oxide) have none and get no silicon model.
         silicon = [
-            r for r in get_region_list(device=device) if r in self.regions.get("si", ())
+            r
+            for r in get_region_list(device=device)
+            if "NetDoping" in get_node_model_list(device=device, region=r)
         ]
 
         for region in silicon:

@@ -190,3 +190,51 @@ def test_ddsolver_solves_only_silicon_regions(clean_devsim, tmp_path, monkeypatc
     potential = devsim.get_node_model_values(device="d_dd", region="n_si", name="Potential")
     assert all(np.isfinite(potential))
     c.delete_device()
+
+
+def test_ddsolver_solves_regions_with_netdoping(clean_devsim, tmp_path, monkeypatch) -> None:
+    """The silicon models go on every region that has NetDoping, whatever its material.
+
+    create_2Duz_simulation gives the contact regions (material "Aluminum" in the v0.8.0 PN slab)
+    NetDoping = 0 (get_simulation.py "Assign doping field contact"), and v0.8.0 solves them as
+    intrinsic silicon, coupled to the slab by the Si/Si interface model. That is kept. A region
+    without NetDoping (oxide) gets no silicon model, nor do its interfaces.
+    """
+    monkeypatch.chdir(tmp_path)  # ddsolver writes debug.dat
+
+    def fake_create_2Duz_simulation(**kwargs):
+        mesh, device = kwargs["devsim_mesh_name"], kwargs["devsim_device_name"]
+        _mesh_1x01um(
+            mesh,
+            {
+                "n_si": ("si", 0.0, 0.5),
+                "al": ("Aluminum", 0.5, 0.8),
+                "ox": ("Oxide", 0.8, 1.0),
+            },
+            contacts=(("cathode", "n_si", 0.0),),
+        )
+        devsim.create_device(mesh=mesh, device=device)
+        for name, value in (("Donors", 1e17), ("Acceptors", 0.0)):
+            model_create.CreateNodeModel(device, "n_si", name, f"{value:g}")
+        model_create.CreateNodeModel(device, "n_si", "NetDoping", "Donors-Acceptors")
+        # as create_2Duz_simulation does for a contact region
+        n = len(devsim.get_node_model_values(device=device, region="al", name="x"))
+        devsim.node_solution(device=device, region="al", name="NetDoping")
+        devsim.set_node_values(device=device, region="al", name="NetDoping", values=[0] * n)
+        regions = {"si": ["n_si"], "Aluminum": ["al"], "Oxide": ["ox"]}
+        return device, regions, {}
+
+    monkeypatch.setattr(get_solver, "create_2Duz_simulation", fake_create_2Duz_simulation)
+    c = _ddcomponent(
+        devsim_mesh_name="m_nd", devsim_device_name="d_nd", atol=1e8, rtol=1e-5
+    )
+
+    c.ddsolver()
+
+    for region in ("n_si", "al"):
+        models = devsim.get_node_model_list(device="d_nd", region=region)
+        assert {"Potential", "Electrons", "Holes"} <= set(models), (region, models)
+    assert "Potential" not in devsim.get_node_model_list(device="d_nd", region="ox")
+    assert devsim.get_interface_model_list(device="d_nd", interface="n_si___al")
+    assert not devsim.get_interface_model_list(device="d_nd", interface="al___ox")
+    c.delete_device()
