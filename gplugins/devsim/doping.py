@@ -6,7 +6,9 @@ positive into the semiconductor. The profiles are:
 
 - :func:`constant`: a uniform concentration, optionally limited to a depth window;
 - :func:`gaussian`: an implant ``peak * exp(-(y - depth)^2 / (2 straggle^2))``, and
-  :func:`gaussian_from_dose`, the same from its dose;
+  :func:`gaussian_from_dose`, the same from its dose. A dose-specified implant is renormalised
+  by default so that the dose in the material (y >= 0) is the stated dose
+  (``truncation="renormalise"``; ``"clip"`` keeps the whole-Gaussian peak);
 - :func:`erfc`: a diffused profile ``surface * erfc(y / length)``;
 - :func:`lateral`: a dimensionless mask-edge factor, the lateral spread of an implant through a
   mask opening ``[xmin, xmax]``, to multiply a vertical profile by.
@@ -132,6 +134,11 @@ class Gaussian(DopingProfile):
         """The dose (cm^-2) of the whole Gaussian, ``peak * sqrt(2 pi) * straggle``."""
         return self.peak * math.sqrt(2 * math.pi) * self.straggle * UM_TO_CM
 
+    @property
+    def dose_in_silicon(self) -> float:
+        """The dose (cm^-2) at y >= 0: :attr:`dose` times ``erfc(-depth/(sqrt(2) straggle))/2``."""
+        return self.dose * _in_silicon_fraction(self.depth, self.straggle)
+
     def __call__(self, x_um, y_um) -> np.ndarray:
         u = (np.asarray(y_um, dtype=float) - self.depth) / self.straggle
         return self.peak * np.exp(-0.5 * u * u) + 0.0 * np.asarray(x_um, dtype=float)
@@ -225,10 +232,44 @@ def gaussian(peak: float, depth: float, straggle: float) -> Gaussian:
     return Gaussian(peak=peak, depth=depth, straggle=straggle)
 
 
-def gaussian_from_dose(dose: float, depth: float, straggle: float) -> Gaussian:
-    """Gaussian implant of ``dose`` (cm^-2): ``peak = dose / (sqrt(2 pi) straggle)``."""
+def _in_silicon_fraction(depth: float, straggle: float) -> float:
+    """The fraction of a whole Gaussian at y >= 0, ``erfc(-depth / (sqrt(2) straggle)) / 2``."""
+    return 0.5 * math.erfc(-depth / (math.sqrt(2) * straggle))
+
+
+Truncation = Literal["renormalise", "clip"]
+
+
+def gaussian_from_dose(
+    dose: float,
+    depth: float,
+    straggle: float,
+    *,
+    truncation: Truncation = "renormalise",
+) -> Gaussian:
+    """Gaussian implant of ``dose`` (cm^-2) at ``depth`` (um) with ``straggle`` (um).
+
+    The doped material occupies y >= 0, so a whole Gaussian puts the fraction
+    ``f = erfc(-depth / (sqrt(2) straggle)) / 2`` of its dose in it; the rest lies above the
+    surface. ``truncation`` says what happens to that rest:
+
+    - ``"renormalise"`` (default): the dose in the material is ``dose``,
+      ``peak = dose / (sqrt(2 pi) straggle f)``. This is how a stated implant dose is read
+      here: the ions are in the wafer.
+    - ``"clip"``: the whole Gaussian has ``dose``, ``peak = dose / (sqrt(2 pi) straggle)``, and
+      only ``dose * f`` is in the material (the part above the surface is discarded).
+
+    For a deep implant (depth >> straggle) the two agree; for the shallow implants of
+    gdsfactory's gpdk process (B 15 keV, P 50 keV) they differ by about 1 %.
+    """
+    if truncation == "renormalise":
+        fraction = _in_silicon_fraction(depth, straggle)
+    elif truncation == "clip":
+        fraction = 1.0
+    else:
+        raise ValueError(f"truncation must be 'renormalise' or 'clip', got {truncation!r}")
     return Gaussian(
-        peak=dose / (math.sqrt(2 * math.pi) * straggle * UM_TO_CM),
+        peak=dose / (math.sqrt(2 * math.pi) * straggle * fraction * UM_TO_CM),
         depth=depth,
         straggle=straggle,
     )
@@ -273,14 +314,20 @@ def dopant_kind(ion: str) -> DopantKind:
 
 
 def profile_from_process(
-    step, *, mask_um: tuple[float | None, float | None] | None = None
+    step,
+    *,
+    mask_um: tuple[float | None, float | None] | None = None,
+    surface_z_um: float | None = None,
+    truncation: Truncation = "renormalise",
 ) -> tuple[DopantKind, DopingProfile]:
     """``(kind, profile)`` of a gdsfactory ``technology.processes`` doping step.
 
     - ``ImplantGaussian``: :func:`gaussian` of ``peak_conc``, ``range`` and
       ``vertical_straggle`` (um);
     - ``ImplantPhysical``: :func:`gaussian_from_dose` of ``dose``, with the range and straggle
-      of ``ion`` at ``energy`` (keV) from ``gplugins.process.implant_tables``;
+      of ``ion`` at ``energy`` (keV) from ``gplugins.process.implant_tables``, and
+      ``truncation`` as in :func:`gaussian_from_dose` (by default the dose in the material is
+      the stated dose). A peak-specified ``ImplantGaussian`` keeps its peak;
     - ``DopingConstant``: :func:`constant` of ``peak_conc`` with ``zmin``/``zmax`` taken as the
       depth window (um below the surface).
 
@@ -315,6 +362,7 @@ def profile_from_process(
             step.dose,
             float(depth_in_silicon[table](step.energy)),
             float(straggle_in_silicon[table](step.energy)),
+            truncation=truncation,
         )
     elif isinstance(step, DopingConstant):
         profile = constant(step.peak_conc, ymin=step.zmin, ymax=step.zmax)
