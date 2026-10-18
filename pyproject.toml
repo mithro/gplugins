@@ -80,6 +80,14 @@ schematic = ["bokeh", "ipywidgets", "natsort"]
 tidy3d = ["tidy3d>=2.11.1,<2.13.0", "gdstk", "pytz"]  # pin max version because tidy3d often introduces breaking API changes across minor releases
 vlsir = ["vlsir", "vlsirtools"]
 
+[tool.uv]
+# The devsim extra needs meshwell 2.5; elmer, femwell and meshwell pin meshwell 2.1.
+conflicts = [
+  [{extra = "devsim"}, {extra = "elmer"}],
+  [{extra = "devsim"}, {extra = "femwell"}],
+  [{extra = "devsim"}, {extra = "meshwell"}]
+]
+
 [tool.codespell]
 ignore-words-list = 'te, te/tm, te, ba, fpr, fpr_spacing, ro, nd, donot, schem, Ue'
 skip = 'notebooks/palace_02_fullwave.ipynb'
