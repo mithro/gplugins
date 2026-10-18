@@ -196,6 +196,35 @@ def _depletion_width_um(c) -> tuple[float, int]:
     return ((max(depleted) - min(depleted)) * 1e4 if depleted else 0.0), len(depleted)
 
 
+def _bottom_spacing_um(c, half_window_um: float = 0.1) -> float:
+    """Largest bottom-edge (y = 0) node spacing within +-half_window_um of the junction."""
+    x, y, d = (_si(c, k) for k in ("x", "y", "NetDoping"))
+    row = sorted({xi * 1e4: di for xi, yi, di in zip(x, y, d) if yi == 0.0}.items())
+    xj = 0.5 * (
+        max(xi for xi, di in row if di > 0) + min(xi for xi, di in row if di < 0)
+    )
+    xs = [xi for xi, _ in row if abs(xi - xj) <= half_window_um]
+    return max(b - a for a, b in zip(xs, xs[1:]))
+
+
+def _analytic_inner_width_um(n_cm3: float = 1e17, fraction: float = 1e-2) -> float:
+    """Depletion-approximation width where n and p < ``fraction`` |N|, symmetric junction.
+
+    With the simple_physics constants DDComponent solves with (eps_si = 11.1, eps_0 =
+    8.85e-14 F/cm, q = 1.6e-19 C, n_i = 1e10 cm^-3, 300 K): each side depletes over
+    x_d = sqrt(eps Vbi / (q N)), and n < fraction N where the Potential is more than
+    Vt ln(1 / fraction) below the neutral level, i.e. inside x_d - sqrt(2 eps Vt ln(1/f) / (q N))
+    of the junction. 0.0666 um for 1e17 / 1e17 (0.068 um with eps_si = 11.7).
+    """
+    from devsim.python_packages import simple_physics as sp
+
+    eps = sp.eps_si * sp.eps_0
+    vbi = _VT * math.log(n_cm3 * n_cm3 / sp.n_i**2)
+    xd = math.sqrt(eps * vbi / (sp.q * n_cm3))
+    inner = xd - math.sqrt(2 * eps * _VT * math.log(1 / fraction) / (sp.q * n_cm3))
+    return 2 * inner * 1e4
+
+
 JUNCTION_OFFSET_UM = (
     0.2  # > the ~0.075 um depletion half-width at 1e17 / 1e17, < the rib half-width
 )
@@ -297,6 +326,7 @@ def _solve(workdir: Path, mesh_scale: float, v080_topology: bool) -> dict:
             "net_doping": (min(doping), max(doping)),
             "depletion_width_um": width,
             "depleted_nodes": nodes,
+            "bottom_spacing_um": _bottom_spacing_um(c),
             "equilibrium": _bias_state(c),
             "bias": [],
         }
@@ -349,15 +379,21 @@ def test_pn_slab_physical_anchors_match_v080(pn_slab, record_property) -> None:
     - anode - cathode contact potential at 0 / 0.1 / 0.2 V: v0.8.0 0.9586540658880733 /
       0.8586540658880735 / 0.7586540658880733 V; its self-difference is 8.9e-16 V, the port's
       is 0, and the port agrees with v0.8.0 within it. It is the ohmic-contact difference
-      2 Vt ln(1.1e18 / n_i), set by the contact doping alone, not by the mesh. Tolerance: the
-      larger self-difference, at least 4 ulp(1 V) = 8.9e-16 V.
+      2 Vt ln(1.1e18 / n_i), set by the contact doping alone, not by the mesh: this is a
+      boundary-condition check, not a mesh check. Tolerance: the larger self-difference, at
+      least 4 ulp(1 V) = 8.9e-16 V.
     - each 0.1 V cathode step lowers it by 0.1 V, to the same tolerance (+2 ulp).
     - NetDoping range: exactly -1.1e18 ... 1.1e18 cm^-3 at both scales, as v0.8.0.
     - depletion width (bottom edge, n and p < 1e-2 |NetDoping|), compared at mesh x0.5
       because at x1 v0.8.0 has only 2 depleted nodes: v0.8.0 0.03863 / 0.06883 um at x1 / x0.5
-      (self-difference 0.03020 um), the port 0.06000 / 0.06000 um (self-difference 0). The port
-      at x0.5 is 0.0088 um from v0.8.0 at x0.5. Tolerance: 0.0302 um, about one 0.02 um
-      element plus the row offset.
+      (self-difference 0.03020 um), the port 0.06000 / 0.06000 um. The width is a difference
+      of two node x positions, so it is quantised to the bottom-edge node spacing (about
+      0.02 um at x1, 0.01 um at x0.5): the port's self-difference of 0 is a quantisation
+      coincidence, not mesh convergence. Against v0.8.0 (port at x0.5 is 0.0088 um from v0.8.0
+      at x0.5) the tolerance is the larger self-difference, 0.0302 um, which is loose. The
+      tighter check is against the depletion-approximation width of the n, p < 1 % |N|
+      region, 0.0666 um (``_analytic_inner_width_um``), within one bottom-edge node spacing
+      near the junction at x0.5 (measured and recorded, ~0.01 um).
     - node counts (reported only): v0.8.0 3523 / 11326, the port 3384 / 10424.
     """
     full, half = pn_slab(1.0), pn_slab(0.5)
@@ -412,6 +448,15 @@ def test_pn_slab_physical_anchors_match_v080(pn_slab, record_property) -> None:
     )
     record_property("depletion_tolerance_um", tol_w)
     assert abs(half["depletion_width_um"] - V080_DEPLETION_UM[0.5]) <= tol_w
+    analytic = _analytic_inner_width_um()
+    spacing = half["bottom_spacing_um"]
+    record_property("depletion_analytic_um", analytic)
+    record_property("bottom_spacing_x0.5_um", spacing)
+    assert abs(half["depletion_width_um"] - analytic) <= spacing, (
+        half["depletion_width_um"],
+        analytic,
+        spacing,
+    )
 
 
 def test_pn_slab_currents_explained(pn_slab, record_property) -> None:
@@ -423,23 +468,34 @@ def test_pn_slab_currents_explained(pn_slab, record_property) -> None:
     ``slab90``, so the bias moved the contact potentials (by exactly 0.1 V per step) and nothing
     else. Measured in the v0.8.0 venv itself (the venv ``python -m gf180tcad.history --version
     v0.8.0 --workdir DIR`` keeps, running checks_v080's PN slab with this file's junction
-    probe, mesh x1 and x0.5; recorded in gf180-tcad's Phase 2 Task 5 report): its mesh has no ``core___slab90`` group; the junction drop (Potential at x_j - 0.2 um minus
-    x_j + 0.2 um, bottom edge) is 0.83450 V at 0, 0.1 and 0.2 V, the built-in potential
+    probe, mesh x1 and x0.5; recorded in gf180-tcad's Phase 2 Task 5 report): its mesh has no
+    ``core___slab90`` group; the junction drop (Potential at x_j - 0.2 um minus x_j + 0.2 um,
+    bottom edge) is 0.83450 V at 0, 0.1 and 0.2 V, the built-in potential
     Vt ln(N_A N_D / n_i^2) of the 1e17 / 1e17 junction; the core and slab90 Potentials at the
     rib's bottom corners differ by 0.46 V (x1) and the rib's absolute Potential is
     mesh-dependent (-0.470 V at x1, -0.671 V at x0.5 at the junction), which is the
     non-physical, mesh-dependent Potential span of the record (0.4793 + 0.8820 = 1.3613 V,
     0.4793 + 1.1474 = 1.6267 V).
 
+    TODO(gf180-tcad, after-Task-8 bump PR): commit that v0.8.0 junction probe to gf180-tcad
+    ``experiments/plugin-history/``, its output to ``results/plugin-history/``, and point this
+    docstring at them instead of the report.
+
     This test shows both devices on the latest stack:
 
     - **v0.8.0 topology** (the same mesh with ``core___slab90`` left out of DEVSIM): the
       currents stay below the 1e-26 A/cm noise floor, the junction drop is 0.83450 V at every
-      step, and the regions disagree at the rib's corners: v0.8.0's behaviour, reproduced.
+      step, and the regions disagree at the rib's corners (non-zero corner jump): v0.8.0's
+      signatures, reproduced. The floating rib's absolute Potential differs from v0.8.0's
+      (and between meshes) because nothing fixes it: with no contact or interface, the rib's
+      offset is set only by the solver's initial guess and the mesh, so only differences
+      inside the rib (the drop) are comparable.
     - **ported topology** (all meshwell interfaces): the drop falls by the applied 0.1 V per
       step (0.8345 / 0.7345 / 0.6345 V), the regions agree at the corners, and the contact
       currents are a forward diode current (9.7e-15, then 1.0e-13 A/cm; anode = -cathode)
-      that grows by a factor between exp(0.1 / 2Vt) and exp(0.1 / Vt) per step.
+      whose implied ideality is between 1 and 2: for I = I0 (exp(V / n Vt) - 1) at 0.1 and
+      0.2 V, I2 / I1 = exp(a) + 1 with a = 0.1 / (n Vt), so n = 0.1 / (Vt ln(I2 / I1 - 1))
+      (measured 1.73).
     """
     vbi = _VT * math.log(1e17 * 1e17 / _NI**2)  # 0.834503 V
 
@@ -473,7 +529,9 @@ def test_pn_slab_currents_explained(pn_slab, record_property) -> None:
         assert k > 1e6 * CURRENT_NOISE_FLOOR and abs(a + k) <= 1e-6 * abs(k), s[
             "currents"
         ]
-    assert math.exp(0.1 / (2 * _VT)) < i2 / i1 < math.exp(0.1 / _VT), (i1, i2)
+    ideality = 0.1 / (_VT * math.log(i2 / i1 - 1))
+    record_property("port_diode_ideality", ideality)
+    assert 1.0 <= ideality <= 2.0, (i1, i2, ideality)
 
 
 _MESH_SCRIPT = """
