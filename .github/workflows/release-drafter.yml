@@ -1,17 +1,22 @@
 name: Release Drafter and Labels
 
+# mithro/gplugins fork (for gf180-tcad, https://github.com/mithro/gf180-tcad):
+# disabled. It needs write tokens and writes to the repository:
+# - update_release_draft creates/edits a draft GitHub release (contents: write),
+#   i.e. it prepares a release, and the fork never releases;
+# - require_label comments on PRs and fails every PR without an upstream
+#   release label.
+# The automatic triggers are removed and every job is guarded with `if: false`.
 on:
-  push:
-    branches:
-      - main
-  pull_request:
-    types: [edited, opened, reopened, synchronize, unlabeled, labeled]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   update_release_draft:
+    # Disabled in the fork (see the note at the top).
+    if: ${{ false }}
     permissions:
       contents: write
       pull-requests: write
@@ -22,7 +27,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   require_label:
-    if: github.event.pull_request
+    # Disabled in the fork (see the note at the top).
+    if: ${{ false }}
     needs: update_release_draft
     runs-on: ubuntu-latest
     permissions:

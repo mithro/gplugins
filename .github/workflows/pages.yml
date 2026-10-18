@@ -1,9 +1,12 @@
 name: build docs
+# mithro/gplugins fork (for gf180-tcad, https://github.com/mithro/gf180-tcad):
+# automatic triggers are removed and the deploy job is disabled.
+# - The docs build needs the upstream SIMCLOUD_APIKEY secret (Tidy3D cloud),
+#   which this fork does not have, and builds Palace for up to an hour.
+# - deploy-docs publishes to GitHub Pages; this fork must not publish a copy
+#   of the upstream gplugins docs.
+# The build can still be run by hand (workflow_dispatch); it never deploys.
 on:
-  pull_request:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
@@ -96,7 +99,8 @@ jobs:
 
   deploy-docs:
     needs: build-docs
-    if: ${{ github.ref == 'refs/heads/main' }}
+    # Disabled in the fork: publishes to GitHub Pages (see the note at the top).
+    if: ${{ false }}
     permissions:
       pages: write
       id-token: write
