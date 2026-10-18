@@ -126,11 +126,11 @@ def silicon_diffused_gaussian_profile(
     # return np.exp(-(z - z0)**2 / (2 * dz**2 + 4*Dconst*t)) * special.erf(-z0/dz * np.sqrt(Dconst*t/(dz**2 + 2*Dconst*t)) - np.sqrt(dz**2 / (4*Dconst*t*(dz**2 + 2*Dconst*t))) * z)
     # return dose / (4 * np.sqrt(2 * np.pi * (dz**2 + 2*Dconst*t))) * (H(z,t) + H(-1*z,t)) * special.erf((a - xx)/(2 * np.sqrt(Dconst * t)))
 
-    return (
-        dose
-        / (np.sqrt(2 * np.pi * (dz**2 + 2 * Dconst * t)))
-        * np.exp(-((z - z0) ** 2) / (dz**2 + 2 * Dconst * t))
-    )
+    # A Gaussian of variance dz**2 diffused for a time t is a Gaussian of variance
+    # dz**2 + 2*D*t (um^2) with the same dose. The prefactor converts the width from um to cm
+    # so that C is in /cm3 for a dose in /cm2.
+    var = dz**2 + 2 * Dconst * t
+    return dose / (np.sqrt(2 * np.pi * var) * 1e-4) * np.exp(-((z - z0) ** 2) / (2 * var))
 
 
 if __name__ == "__main__":
