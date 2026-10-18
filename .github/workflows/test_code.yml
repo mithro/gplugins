@@ -1,8 +1,7 @@
 name: Test code
 # mithro/gplugins fork (for gf180-tcad, https://github.com/mithro/gf180-tcad):
 # this is the fork's PR/main test workflow. It runs on GitHub-hosted runners
-# with no repository secrets (GITHUB_TOKEN is the per-run token GitHub
-# provides, read-only here). gplugins/devsim is still excluded from the matrix
+# and passes no secrets or tokens to any step. gplugins/devsim is still excluded from the matrix
 # and from pytest (pyproject.toml norecursedirs) until gf180-tcad Phase 2
 # Task 4 adds a devsim job that runs in the pinned gf180-tcad TCAD image.
 
@@ -22,8 +21,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
       - uses: pre-commit/action@v3.0.1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   test_code:
     runs-on: ${{ matrix.os }}

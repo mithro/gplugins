@@ -19,9 +19,9 @@ fork as its `third_party/gplugins` git submodule and restores and extends the
   fork (base `mithro/gplugins:main`).
 - Upstream (gdsfactory/gplugins) is **read-only** for this fork: no pushes,
   pull requests, issues or comments are made there.
-- Fork CI runs only `Test code` (no secrets). The workflows that publish
-  (`release.yml`, the `pages.yml` deploy, `release-drafter.yml`) are disabled;
-  each says why at its top.
+- Fork CI runs only `Test code` (no secrets). The upstream workflows that
+  publish or need upstream secrets (`release.yml`, `release-drafter.yml`,
+  `pages.yml`) are deleted, because this fork never releases or publishes.
 - The fork keeps the upstream MIT licence.
 
 ## GDSFactory plugins
