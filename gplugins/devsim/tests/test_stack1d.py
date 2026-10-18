@@ -17,7 +17,7 @@ from gplugins.devsim import doping
 from gplugins.devsim.contacts import Contact, InterfaceRef, LayerRef, delete_circuit
 from gplugins.devsim.convergence import ConvergenceError
 from gplugins.devsim.materials import CONSTANTS, Constants
-from gplugins.devsim.stack1d import Layer1D, Mesh1D, create_1d_stack
+from gplugins.devsim.stack1d import Layer1D, Mesh1D, create_1d_stack, graded_spacings
 
 UM = 1e-4  # cm
 
@@ -30,12 +30,15 @@ PFET = {"gate": ("acceptor", 3.6e19), "body": "donor", "tox_um": 0.0156, "vfb": 
 
 @pytest.fixture(autouse=True)
 def clean_devsim():
-    """Fail on, and remove, any device or circuit a test leaves; restore DEVSIM precision."""
+    """Fail on, and remove, any device a test leaves; delete leftover circuits and meshes;
+    restore DEVSIM precision."""
     yield
     left = list(devsim.get_device_list())
     for device in left:
         devsim.delete_device(device=device)
     delete_circuit()
+    for mesh in devsim.get_mesh_list():
+        devsim.delete_mesh(mesh=mesh)
     for name in ("extended_solver", "extended_model", "extended_equation"):
         devsim.set_parameter(name=name, value=False)
     assert not left, f"devices left behind: {left}"
@@ -143,11 +146,48 @@ def test_stack1d_regions_and_spacing() -> None:
         assert h[0] >= 0.5 * h0 and h[-1] >= 0.5 * h1, (region, h[0], h[-1])
         assert max(h) <= max(h0, h1) * (1 + 1e-9)
         assert min(h) >= 0.5 * min(h0, h1)
+        assert all(max(b / a, a / b) <= 1.25 * (1 + 1e-12) for a, b in zip(h, h[1:]))
         if len(h) > 2:
             ratios = [b / a for a, b in zip(h, h[1:])]
             r = (h1 / h0) ** (1 / (len(h) - 1))
             assert all(math.isclose(q, r, rel_tol=1e-6) for q in ratios), (region, ratios)
+    # neighbouring spacings across every layer boundary are within the default max_ratio too
+    x_all = sorted({x for region in spacing for x in _node_x_um(dd, region)})
+    h_all = [b - a for a, b in zip(x_all, x_all[1:])]
+    assert all(max(b / a, a / b) <= 1.25 * (1 + 1e-12) for a, b in zip(h_all, h_all[1:]))
     dd.delete_device()
+
+
+def test_mesh1d_max_ratio() -> None:
+    """Mesh1D.max_ratio (default 1.25) bounds the ratio of neighbouring spacings."""
+    assert Mesh1D({"a": (1.0, 1.0)}).max_ratio == 1.25
+    with pytest.raises(ValueError):
+        Mesh1D({"a": (1.0, 1.0)}, max_ratio=1.0)
+    # 0.01 -> 0.0002 over 0.03 um: filling the length alone would need only a few intervals,
+    # with a neighbour ratio far above 1.25; max_ratio forces more, never coarser ones
+    for max_ratio in (1.25, 1.1):
+        h = graded_spacings(0.03, 0.01, 0.0002, max_ratio=max_ratio)
+        assert math.isclose(math.fsum(h), 0.03, rel_tol=1e-12)
+        ratios = [a / b for a, b in zip(h, h[1:])]
+        assert all(1.0 <= r <= max_ratio * (1 + 1e-12) for r in ratios), ratios
+        assert h[0] <= 0.01 and h[-1] <= 0.0002 * (1 + 1e-12)
+    assert len(graded_spacings(0.03, 0.01, 0.0002)) > len(
+        graded_spacings(0.03, 0.01, 0.0002, max_ratio=100.0)
+    )
+    # a jump of requested spacings across a layer boundary beyond max_ratio is refused
+    layers = [
+        Layer1D("ox", "oxide", 0.01, None),
+        Layer1D("si", "silicon", 0.1, doping.constant(1e17), "acceptor"),
+    ]
+    contacts = [
+        Contact("g", InterfaceRef("ox", None), "gate"),
+        Contact("b", InterfaceRef("si", None), "ohmic"),
+    ]
+    with pytest.raises(ValueError, match="max_ratio"):
+        create_1d_stack(
+            "jump", layers, contacts, Mesh1D({"ox": (0.001, 0.001), "si": (0.005, 0.01)}), CONSTANTS
+        )
+    assert not devsim.get_device_list()
 
 
 def test_stack1d_rejects_bad_contacts() -> None:
@@ -263,7 +303,38 @@ def flatband(dd, charge, v0: float, v1: float, tol: float = 1e-7) -> float:
 
 def _poly_gate_charge(dd) -> float:
     """Gate charge (C/cm^2): the poly region's space charge plus its contact's charge."""
-    return dd.region_charge("gate_poly") + dd.contact_charge("gate")
+    return dd.electrode_charge("gate", ["gate_poly"])
+
+
+@pytest.mark.parametrize("case", [NFET, PFET], ids=["nfet", "pfet"])
+@pytest.mark.parametrize("pvg", [-2.0, 0.0], ids=["accumulation", "depletion"])
+def test_gate_charge_neutral_and_gauss(case, pvg) -> None:
+    """Away from flat band, Q_gate = -(Q_body) = eps_ox E_ox (C/cm^2).
+
+    At polarity * Vg = -2 V (accumulation) and 0 V (depletion; |Vg - Vfb| ~ 1 V). Strong
+    inversion is not used: with only a body contact the DC ramp there does not converge
+    (it raises ConvergenceError), a Task 8 matter.
+
+    Q_gate is the gate electrode charge (poly space charge + gate contact charge), Q_body
+    the body's (body space charge + body contact charge); the oxide holds no charge, so the
+    device is neutral and, by Gauss, both equal the oxide D field (uniform in 1D). Task 8's
+    C-V uses this gate charge.
+    """
+    vg = pvg if case["body"] == "acceptor" else 0.0 - pvg  # 0.0 - 0.0 is +0.0
+    dd = _poly_stack(f"neutral_{case['body']}_{vg:+.0f}", case)
+    n = 20
+    for k in range(1, n + 1):
+        dd.set_bias("gate", vg * k / n)
+        dd.solve_dc()
+    q_gate = dd.electrode_charge("gate", ["gate_poly"])
+    q_body = dd.electrode_charge("body", ["body"])
+    d_ox = devsim.get_edge_model_values(device=dd.device, region="oxide", name="PotentialEdgeFlux")
+    cox = CONSTANTS.eps_ox * CONSTANTS.eps0_f_per_cm / (case["tox_um"] * UM)
+    print(f"{case['body']} Vg {vg}: Q_gate {q_gate!r}, Q_body {q_body!r}, D_ox {d_ox[0]!r} C/cm^2")
+    assert abs(q_gate) > cox * 0.1  # at least a 0.1 V oxide drop: well away from flat band
+    assert abs(q_gate + q_body) <= 1e-6 * abs(q_gate)
+    assert all(abs(d - q_gate) <= 1e-6 * abs(q_gate) for d in d_ox)
+    dd.delete_device()
 
 
 @pytest.mark.parametrize("case", [NFET, PFET], ids=["nfet", "pfet"])
@@ -275,7 +346,8 @@ def test_poly_gate_flatband(case) -> None:
     assert round(expected, 3) == case["vfb"]
 
     dd = _poly_stack(f"vfb_{case['body']}", case)
-    vfb = flatband(dd, _poly_gate_charge, 0.9 * expected, expected)
+    # seeds independent of the answer: 0 V and 0.5 V towards the expected side
+    vfb = flatband(dd, _poly_gate_charge, 0.0, sign * 0.5)
     # at flat band the oxide field (the gate charge by Gauss) is zero too
     d_ox = devsim.get_edge_model_values(device=dd.device, region="oxide", name="PotentialEdgeFlux")
     print(f"{case['body']} body: Vfb {vfb!r} V, Boltzmann {expected!r} V, D_ox {d_ox[0]!r}")

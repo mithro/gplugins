@@ -33,6 +33,8 @@ def clean_devsim():
     for device in left:
         devsim.delete_device(device=device)
     delete_circuit()
+    for mesh in devsim.get_mesh_list():
+        devsim.delete_mesh(mesh=mesh)
     for name in ("extended_solver", "extended_model", "extended_equation"):
         devsim.set_parameter(name=name, value=False)
     assert not left, f"devices left behind: {left}"
@@ -82,7 +84,8 @@ def _metal_gate_vfb(offset: float) -> float:
 
     dd = _metal_gate_stack(f"wf{offset:+.2f}", offset)
     psi_b = -CONSTANTS.vt_v * math.log(N_A / CONSTANTS.n_i_cm3)
-    vfb = flatband(dd, lambda d: d.contact_charge("gate"), psi_b + offset - 0.05, psi_b + offset)
+    # seeds independent of the answer
+    vfb = flatband(dd, lambda d: d.electrode_charge("gate", []), 0.0, -0.5)
     dd.delete_device()
     return vfb
 
@@ -228,6 +231,10 @@ def test_ddcomponent_contact_info_is_deprecated(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     with pytest.warns(DeprecationWarning, match="contact_info"):
         DDComponent(**_pn_inputs(), extended_precision=False)
+    with pytest.raises(ValueError, match="neither"):
+        kw = _pn_inputs()
+        kw.pop("contact_info")
+        DDComponent(**kw, extended_precision=False)
     with pytest.raises(ValueError, match="not both"):
         DDComponent(
             **_pn_inputs(),
