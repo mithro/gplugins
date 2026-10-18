@@ -9,7 +9,10 @@ positive into the semiconductor. The profiles are:
   :func:`gaussian_from_dose`, the same from its dose. A dose-specified implant is renormalised
   by default so that the dose in the material (y >= 0) is the stated dose
   (``truncation="renormalise"``; ``"clip"`` keeps the whole-Gaussian peak);
-- :func:`erfc`: a diffused profile ``surface * erfc(y / length)``;
+- :func:`erfc`: a diffused profile ``surface * erfc(y / length)``, with ``length = 2 sqrt(D t)``
+  (the brief's ``erfc(surface, xj)`` form is :func:`erfc_from_junction`, which takes the
+  junction depth ``xj`` with a ``background`` doping and sets
+  ``length = xj / erfcinv(background / surface)``);
 - :func:`lateral`: a dimensionless mask-edge factor, the lateral spread of an implant through a
   mask opening ``[xmin, xmax]``, to multiply a vertical profile by.
 
@@ -267,7 +270,9 @@ def gaussian_from_dose(
     elif truncation == "clip":
         fraction = 1.0
     else:
-        raise ValueError(f"truncation must be 'renormalise' or 'clip', got {truncation!r}")
+        raise ValueError(
+            f"truncation must be 'renormalise' or 'clip', got {truncation!r}"
+        )
     return Gaussian(
         peak=dose / (math.sqrt(2 * math.pi) * straggle * fraction * UM_TO_CM),
         depth=depth,
@@ -276,8 +281,24 @@ def gaussian_from_dose(
 
 
 def erfc(surface: float, length: float) -> Erfc:
-    """Diffused profile: ``surface * erfc(y / length)``, with ``length = 2 sqrt(D t)`` in um."""
+    """Diffused profile: surface times the complementary error function of y / length (um)."""
     return Erfc(surface=surface, length=length)
+
+
+def erfc_from_junction(surface: float, xj: float, background: float) -> Erfc:
+    """Diffused erfc profile whose metallurgical junction with ``background`` is at ``xj``.
+
+    ``surface * erfc(xj / L) = background`` gives ``L = xj / erfcinv(background / surface)``.
+    ``surface`` and ``background`` are in cm^-3 with ``0 < background < surface``; ``xj`` in um.
+    """
+    if not 0 < background < surface:
+        raise ValueError(
+            f"background must satisfy 0 < background < surface, got {background!r} and "
+            f"surface {surface!r}"
+        )
+    return Erfc(
+        surface=surface, length=xj / float(special.erfcinv(background / surface))
+    )
 
 
 def lateral(
@@ -396,7 +417,9 @@ def _doping_constant_profile(step, surface_z_um: float | None) -> Constant:
             f"above the surface z={surface_z_um!r}"
         )
     return constant(
-        step.peak_conc, ymin=max(0.0, surface_z_um - zmax), ymax=surface_z_um - step.zmin
+        step.peak_conc,
+        ymin=max(0.0, surface_z_um - zmax),
+        ymax=surface_z_um - step.zmin,
     )
 
 
