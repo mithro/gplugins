@@ -16,12 +16,16 @@ from devsim import (
     write_devices,
 )
 from gdsfactory import Component
-from gdsfactory.technology import LayerLevel, LayerStack
+from gdsfactory.technology import LayerLevel, LayerStack, LogicalLayer
+from meshwell.polysurface import PolySurface
+from meshwell.resolution import ResolutionSpec
 from scipy.interpolate import NearestNDInterpolator
+from shapely.geometry import LineString, Polygon
 
-from gplugins.devsim.doping import get_doping_info_generic
 from gplugins.common.base_models.component import fuse_polygons
-from gplugins.meshwell import get_u_bounds_polygons
+from gplugins.devsim.doping import get_doping_info_generic
+from gplugins.devsim.meshing import legacy_resolutions, mesh_xsection
+from gplugins.meshwell import get_meshwell_cross_section, get_u_bounds_polygons
 
 um_to_cm = 1e-4
 
@@ -33,11 +37,12 @@ def create_2Duz_simulation(
     physical_layer_stack: LayerStack,
     doping_info,  # Dict[str, DopingLayerLevel],
     contact_info,
-    resolutions: dict[str, dict] | None = None,
+    resolutions: dict[str, list[ResolutionSpec]] | dict[str, dict] | None = None,
     mesh_scaling_factor: float = um_to_cm,
     default_resolution_min: float = 0.001,
     default_resolution_max: float = 0.2,
     background_tag: str | None = None,
+    background_padding: tuple[float, float, float, float] = (2.0, 2.0, 2.0, 2.0),
     temp_file_name: str = "temp.msh2",
     devsim_mesh_name: str = "temp",
     devsim_device_name: str = "temp",
@@ -45,6 +50,32 @@ def create_2Duz_simulation(
     global_meshsize_array: np.array | None = None,
     global_meshsize_interpolant_func: callable | None = NearestNDInterpolator,
 ):
+    """Mesh the u-z cross-section of ``component`` along ``xsection_bounds`` into DEVSIM.
+
+    The mesh comes from meshwell 2.5 through :func:`gplugins.devsim.meshing.mesh_xsection`
+    (single-threaded, pinned gmsh seed, MSH 2.2), in units of ``mesh_scaling_factor`` (cm).
+
+    Args:
+        resolutions: meshwell resolution specs by layer name, e.g.
+            ``{"core": [ConstantInField(resolution=0.02, apply_to="surfaces")]}``. The
+            gplugins <= 0.8 form ``{"core": {"resolution": 0.02, "distance": 1}}`` is also
+            accepted (see :func:`gplugins.devsim.meshing.legacy_resolutions`).
+        default_resolution_min, default_resolution_max: gmsh's smallest and largest element
+            size (um).
+        background_tag: if given, a background region of that name and material fills the
+            bounding box of the stack, padded by ``background_padding`` (u-left, z-down,
+            u-right, z-up, um).
+        global_meshsize_array: ``[x, y, z, size]`` rows (um) that replace ``resolutions``.
+
+    Naming: DEVSIM regions are the layer names of ``physical_layer_stack`` plus one region
+    per contact (named after the contact). gmsh physical groups between two regions are
+    ``a___b`` and on the outer boundary ``a___None`` (meshwell's delimiters); a contact is
+    the ``<contact>___<layer>`` (or ``<layer>___<contact>``) group, and every ``a___b`` group
+    between two regions is added as a DEVSIM interface of that name.
+
+    Returns:
+        ``(device name, {material: [region names]}, {(material, material): [interfaces]})``.
+    """
     # Replace relevant physical entities by contacts
     simulation_layertack = physical_layer_stack
     for contact_name, contact_dict in contact_info.items():
@@ -61,23 +92,40 @@ def create_2Duz_simulation(
         )
         simulation_layertack.layers[contact_name] = layerlevel
 
-    # Get structural mesh
-    # TODO: Update to use meshwell API
-    # The old uz_xsection_mesh has been removed. Replace with:
-    # 1. Convert xsection_bounds to LineString
-    # 2. Call get_meshwell_cross_section() to get surfaces
-    # 3. Use meshwell.cad.cad() to create CAD file
-    # 4. Use meshwell.mesh.mesh() to create mesh file with resolutions
-    raise NotImplementedError(
-        "uz_xsection_mesh has been removed. "
-        "This function needs to be updated to use the new meshwell API. "
-        "See gplugins/femwell/mode_solver.py:compute_component_slice_modes for an example."
+    # Get structural mesh (meshwell 2.5, single-threaded; see gplugins.devsim.meshing)
+    surfaces = xsection_entities(
+        component,
+        xsection_bounds,
+        simulation_layertack,
+        background_tag=background_tag,
+        background_padding=background_padding,
     )
+    if global_meshsize_array is not None:
+        # As in gplugins <= 0.8: a global size map replaces the resolutions.
+        resolution_specs = {}
+    elif resolutions and all(isinstance(v, dict) for v in resolutions.values()):
+        resolution_specs = legacy_resolutions(resolutions, default_resolution_max)
+    else:
+        resolution_specs = resolutions or {}
+    mesh = mesh_xsection(
+        surfaces,
+        temp_file_name,
+        resolution_specs,
+        resolution_min=default_resolution_min,
+        resolution_max=default_resolution_max,
+        global_scaling=mesh_scaling_factor,
+        global_meshsize_array=global_meshsize_array,
+        global_meshsize_interpolant_func=global_meshsize_interpolant_func,
+    )
+
+    # The gmsh physical group names. meshio has no cell sets for MSH 2.2 (which DEVSIM reads),
+    # so they come from its field_data (name -> [tag, dim]).
+    physical_names = set(mesh.field_data) | set(mesh.cell_sets_dict)
 
     # Get doping layer bounds
     doping_polygons = {}
     for layername, layer_obj in doping_info.items():
-        fused_polygons = fuse_polygons(component, layername, layer_obj.layer)
+        fused_polygons = fuse_polygons(component, LogicalLayer(layer=layer_obj.layer))
         bounds = get_u_bounds_polygons(fused_polygons, xsection_bounds)
         doping_polygons[layername] = [np.array(bound) * um_to_cm for bound in bounds]
 
@@ -112,7 +160,7 @@ def create_2Duz_simulation(
         layer1 = contact_name
         layer2 = contact["physical_layerlevel_to_contact"]
         interface = f"{layer1}___{layer2}"
-        if interface not in mesh.cell_sets_dict.keys():
+        if interface not in physical_names:
             interface = f"{layer2}___{layer1}"
         add_gmsh_contact(
             gmsh_name=interface,
@@ -129,9 +177,9 @@ def create_2Duz_simulation(
         simulation_layer_stack_dict.items(), 2
     ):
         interface = f"{name1}___{name2}"
-        if interface not in mesh.cell_sets_dict.keys():
+        if interface not in physical_names:
             interface = f"{name2}___{name1}"
-            if interface not in mesh.cell_sets_dict.keys():
+            if interface not in physical_names:
                 continue
         # if interface not in contacts.values():
         add_gmsh_interface(
@@ -141,10 +189,9 @@ def create_2Duz_simulation(
             region0=name1,
             region1=name2,
         )
-        if interface in interfaces:
-            interfaces[(values1["material"], values2["material"])].append(interface)
-        else:
-            interfaces[(values1["material"], values2["material"])] = [interface]
+        interfaces.setdefault((values1["material"], values2["material"]), []).append(
+            interface
+        )
     finalize_mesh(mesh=devsim_mesh_name)
     create_device(mesh=devsim_mesh_name, device=devsim_device_name)
 
@@ -228,20 +275,74 @@ def create_2Duz_simulation(
     return devsim_device_name, regions, interfaces
 
 
+def xsection_entities(
+    component: Component,
+    xsection_bounds: tuple[tuple[float, float], tuple[float, float]],
+    layer_stack: LayerStack,
+    background_tag: str | None = None,
+    background_padding: tuple[float, float, float, float] = (2.0, 2.0, 2.0, 2.0),
+) -> list[PolySurface]:
+    """The meshwell surfaces of the u-z cross-section of ``layer_stack`` along the line.
+
+    u is the distance along ``xsection_bounds`` from its first point. Each layer with shapes
+    on the line is one surface named after the layer. Overlaps go to the lowest
+    ``mesh_order`` and ties to the first layer name in alphabetical order, the order of
+    gplugins <= 0.8 (``order_layer_stack`` in ``uz_xsection_mesh``); meshwell itself breaks
+    ties by list order, so the list is sorted that way.
+    """
+    surfaces = get_meshwell_cross_section(
+        component=component,
+        line=LineString(xsection_bounds),
+        layer_stack=layer_stack,
+        wafer_layer=None,
+        wafer_padding=None,
+        name_by="layer",
+    )
+    surfaces.sort(key=lambda s: (s.mesh_order, s.physical_name))
+    if background_tag:
+        surfaces.append(
+            _background_surface(layer_stack, xsection_bounds, background_tag, background_padding)
+        )
+    return surfaces
+
+
+def _background_surface(layer_stack, xsection_bounds, tag, padding) -> PolySurface:
+    """A ``tag`` rectangle around the stack's z-range and the cross-section line, padded.
+
+    As gplugins <= 0.8 ``uz_xsection_mesh``: it has the highest mesh_order, so it only fills
+    what no layer claims.
+    """
+    levels = layer_stack.layers.values()
+    zs = [z for lv in levels for z in (lv.zmin, lv.zmin + lv.thickness)]
+    length = float(np.linalg.norm(np.array(xsection_bounds[1]) - np.array(xsection_bounds[0])))
+    left, down, right, up = padding
+    zmin, zmax = min(zs), max(zs)
+    box = Polygon(
+        [
+            (-left, zmin - down),
+            (-left, zmax + up),
+            (length + right, zmax + up),
+            (length + right, zmin - down),
+        ]
+    )
+    order = max(lv.mesh_order for lv in levels) + 1
+    return PolySurface(polygons=box, physical_name=tag, mesh_order=order)
+
+
 if __name__ == "__main__":
     import gdsfactory as gf
-    from gdsfactory.gpdk import LAYER, LAYER_STACK
+    from gdsfactory.gpdk import LAYER, LAYER_STACK, PDK
+
+    PDK.activate()
 
     # We choose a representative subdomain of the component
     waveguide = gf.Component()
     waveguide.add_ref(
         gf.functions.trim(
-            component=gf.components.straight_pn(length=10, taper=None),
+            component=gf.components.straight_pn(length=10, taper=None).copy(),
             domain=[[3, -4], [3, 4], [5, 4], [5, -4]],
         )
     )
-
-    waveguide.show()
 
     # We will restrict the physical mesh to a subset of layers:
     layermap = LAYER
@@ -265,17 +366,27 @@ if __name__ == "__main__":
     cathode_layer = (106, 0)
 
     # We will generate contacts where the vias intersect heavy doping
-    via_contact_locations = waveguide.extract(layermap.VIAC)
-    NPP_location = waveguide.extract(layermap.NPP)
-    PPP_location = waveguide.extract(layermap.PPP)
+    via_contact_locations = waveguide.extract([layermap.VIAC])
+    NPP_location = waveguide.extract([layermap.NPP])
+    PPP_location = waveguide.extract([layermap.PPP])
     waveguide.add_ref(
-        gf.geometry.boolean(
-            via_contact_locations, NPP_location, operation="AND", layer=anode_layer
+        gf.boolean(
+            via_contact_locations,
+            NPP_location,
+            operation="and",
+            layer=anode_layer,
+            layer1=layermap.VIAC,
+            layer2=layermap.NPP,
         )
     )
     waveguide.add_ref(
-        gf.geometry.boolean(
-            via_contact_locations, PPP_location, operation="AND", layer=cathode_layer
+        gf.boolean(
+            via_contact_locations,
+            PPP_location,
+            operation="and",
+            layer=cathode_layer,
+            layer1=layermap.VIAC,
+            layer2=layermap.PPP,
         )
     )
 
@@ -296,8 +407,6 @@ if __name__ == "__main__":
             "physical_layerlevel_to_contact": "slab90",
         },
     }
-
-    waveguide.show()
 
     resolutions = {
         "core": {"resolution": 0.01, "distance": 2},
