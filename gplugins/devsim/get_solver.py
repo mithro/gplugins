@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import math
+import warnings
+from collections.abc import Mapping, Sequence
+
 import numpy as np
 from devsim import (
+    circuit_alter,
+    circuit_element,
     delete_device,
     delete_mesh,
     edge_average_model,
     edge_from_node_model,
+    get_circuit_node_value,
+    get_contact_charge,
     get_contact_list,
     get_edge_model_list,
     get_edge_model_values,
@@ -15,22 +23,28 @@ from devsim import (
     get_region_list,
     set_node_values,
     set_parameter,
-    solve,
     write_devices,
 )
+from devsim import solve as devsim_solve
 from devsim.python_packages import model_create, simple_physics
 from gdsfactory.component import Component
 from gdsfactory.pdk import get_layer_stack
 from gdsfactory.technology import LayerStack
 
+from gplugins.devsim import contacts as contacts_mod
+from gplugins.devsim import materials
+from gplugins.devsim.contacts import Contact
+from gplugins.devsim.convergence import solve_dc
 from gplugins.devsim.doping import (
     DopingLayerLevel,
     get_doping_info_generic,
 )
 from gplugins.devsim.get_simulation import create_2Duz_simulation
+from gplugins.devsim.materials import CONSTANTS, SIMPLE_PHYSICS_V080, Constants
 
 
 def set_universal_parameters(device, region) -> None:
+    """Deprecated (unused): DEVSIM simple_physics' q, k and eps_0; see gplugins.devsim.materials."""
     universal = {
         "q": 1.6e-19,  # , 'coul'),
         "k": 1.3806503e-23,  # , 'J/K'),
@@ -48,7 +62,7 @@ class DDComponent:
         full_layer_stack: LayerStack,
         physical_layer_stack: LayerStack,
         doping_info: dict[str, DopingLayerLevel],
-        contact_info=dict,
+        contact_info: dict | None = None,
         resolutions: dict[str, dict] | None = None,
         mesh_scaling_factor: float = 1e-4,
         background_tag: str | None = None,
@@ -60,6 +74,8 @@ class DDComponent:
         rtol: float = 1e-12,
         max_iter: int = 200,
         extended_precision: bool = True,
+        contacts: Sequence[Contact] | None = None,
+        constants: Constants | None = None,
     ) -> None:
         """Drift-diffusion solver on a Component cross-section.
 
@@ -83,7 +99,14 @@ class DDComponent:
                         z_profile=step(p_conc),
                     ),
 
-            contact_info: dict relating contact names and gds, e.g.
+            contacts: typed contacts (:class:`gplugins.devsim.contacts.Contact`), e.g.
+                ``[Contact("anode", LayerRef((105, 0)), "ohmic"), ...]``. The stack must hold
+                the contact levels. Solved with ``constants`` (default: the cited
+                :data:`gplugins.devsim.materials.CONSTANTS`), with Poisson in the oxide
+                regions, material-pair interfaces and the contacts' own boundary conditions.
+            constants: material constants (:class:`gplugins.devsim.materials.Constants`).
+            contact_info: **deprecated** (use ``contacts``): the gplugins <= 0.8 dict relating
+                contact names and gds layers, e.g.
 
                 contact_info = {
                     "anode": {                                              # key is contact name
@@ -98,7 +121,11 @@ class DDComponent:
                     },
                 }
 
-                TODO: make this relate to only GDS layers + ports / nets
+                Without ``contacts`` the device is solved as gplugins v0.8.0 did, bit for bit:
+                only the regions with ``NetDoping`` (silicon and the contact regions, as
+                intrinsic silicon), with ohmic contacts, and by default with DEVSIM
+                ``simple_physics``' values (:data:`gplugins.devsim.materials.SIMPLE_PHYSICS_V080`:
+                eps_si 11.1, 300 K, n_i 1e10), unless ``constants`` is given.
 
             # Mesh parameters
             resolutions: dict of mesh resolutions (see meshing module)
@@ -116,14 +143,35 @@ class DDComponent:
             rtol: relative tolerance threshold for self-consistent solve
             max_iter : maximum number of iterations for self-consistent solve
             extended_precision: if True (default), sets double precision
+
+        A solve that does not converge raises
+        :class:`gplugins.devsim.convergence.ConvergenceError`.
         """
+        if contacts is not None and contact_info:
+            raise ValueError("pass contacts or contact_info, not both")
+        if contacts is None:
+            if contact_info is not None:
+                warnings.warn(
+                    "DDComponent(contact_info=...) is deprecated and solves with gplugins "
+                    "v0.8.0's physics; pass contacts=[gplugins.devsim.contacts.Contact(...)] "
+                    "and constants=gplugins.devsim.materials.Constants()",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+            self.legacy = True
+            default_constants = SIMPLE_PHYSICS_V080
+        else:
+            self.legacy = False
+            default_constants = CONSTANTS
         # Set attributes
         self.component = component
         self.xsection_bounds = xsection_bounds
         self.full_layer_stack = full_layer_stack or get_layer_stack()
         self.physical_layer_stack = physical_layer_stack
         self.doping_info = doping_info or get_doping_info_generic()
-        self.contact_info = contact_info
+        self.contact_info = contact_info or {}
+        self.contacts = tuple(contacts or ())
+        self.constants = constants or default_constants
         self.resolutions = resolutions or {}
         self.mesh_scaling_factor = mesh_scaling_factor
         self.background_tag = background_tag
@@ -134,19 +182,235 @@ class DDComponent:
         self.atol = atol
         self.rtol = rtol
         self.max_iter = max_iter
+        self.region_classes: dict[str, str | None] = {}
+        self.last_solve_info: dict | None = None
 
         # Set precision
         if extended_precision:
             self.set_extended_precision()
+
+    @classmethod
+    def from_device(
+        cls,
+        *,
+        device: str,
+        mesh: str,
+        region_classes: Mapping[str, str | None],
+        contacts: Sequence[Contact],
+        constants: Constants,
+        atol: float,
+        rtol: float,
+        max_iter: int,
+        extended_precision: bool = True,
+    ) -> DDComponent:
+        """A DDComponent for a DEVSIM device built elsewhere (e.g. by ``create_1d_stack``).
+
+        ``device`` must have its mesh, regions, contacts, interfaces and (on silicon regions)
+        ``NetDoping``. ``region_classes`` maps every region to ``"silicon"``, ``"oxide"`` or
+        ``None``. The physics are set up and the equilibrium is solved.
+        """
+        self = cls.__new__(cls)
+        self.legacy = False
+        self.component = None
+        self.xsection_bounds = None
+        self.full_layer_stack = None
+        self.physical_layer_stack = None
+        self.doping_info = {}
+        self.contact_info = {}
+        self.contacts = tuple(contacts)
+        self.constants = constants
+        self.resolutions = {}
+        self.mesh_scaling_factor = 1e-4
+        self.background_tag = None
+        self.temp_file_name = None
+        self.devsim_mesh_name = mesh
+        self.devsim_device_name = device
+        self.devsim_simulation_filename = (None,)
+        self.atol = atol
+        self.rtol = rtol
+        self.max_iter = max_iter
+        self.last_solve_info = None
+        self.device = device
+        self.regions = {}
+        for region, region_class in region_classes.items():
+            self.regions.setdefault(region_class, []).append(region)
+        self.interfaces = {}
+        self.region_classes = dict(region_classes)
+        if extended_precision:
+            self.set_extended_precision()
+        self.setup_physics()
+        return self
 
     def set_extended_precision(self) -> None:
         set_parameter(name="extended_solver", value=True)
         set_parameter(name="extended_model", value=True)
         set_parameter(name="extended_equation", value=True)
 
+    # --- solving ------------------------------------------------------------------------------
+    def solve_dc(
+        self,
+        *,
+        absolute_error: float | None = None,
+        relative_error: float | None = None,
+        maximum_iterations: int | None = None,
+    ) -> dict:
+        """DC solve at this component's tolerances (or the given ones); raises unless converged.
+
+        Returns DEVSIM's solve info, also kept as ``last_solve_info``.
+        """
+        self.last_solve_info = solve_dc(
+            absolute_error=self.atol if absolute_error is None else absolute_error,
+            relative_error=self.rtol if relative_error is None else relative_error,
+            maximum_iterations=self.max_iter
+            if maximum_iterations is None
+            else maximum_iterations,
+        )
+        return self.last_solve_info
+
+    def _contact(self, name: str) -> Contact | None:
+        for c in self.contacts:
+            if c.name == name:
+                return c
+        return None
+
+    def set_bias(self, contact: str, value: float) -> None:
+        """Set the DC bias (V) of ``contact``: its source if ``circuit=True``, else its parameter."""
+        typed = self._contact(contact)
+        if typed is not None and typed.circuit:
+            circuit_alter(name=contacts_mod.source_name(contact), value=float(value))
+        else:
+            set_parameter(
+                device=self.device,
+                name=contacts_mod.bias_name(contact),
+                value=float(value),
+            )
+
+    def contact_charge(self, contact: str) -> float:
+        """DEVSIM's contact charge of ``contact`` (C/cm^2 in 1D, C/cm in 2D)."""
+        return get_contact_charge(
+            device=self.device, contact=contact, equation="PotentialEquation"
+        )
+
+    def region_charge(self, region: str) -> float:
+        """Space charge q (p - n + NetDoping) integrated over ``region`` (C/cm^2 in 1D).
+
+        0 for a region without ``NetDoping`` (oxide). The carriers are the drift-diffusion
+        solution, or the equilibrium ones before it exists.
+        """
+        models = get_node_model_list(device=self.device, region=region)
+        if "NetDoping" not in models:
+            return 0.0
+        n, p = ("Electrons", "Holes") if "Electrons" in models else (
+            "IntrinsicElectrons",
+            "IntrinsicHoles",
+        )
+
+        def values(name):
+            return get_node_model_values(device=self.device, region=region, name=name)
+
+        q = self.constants.q_c
+        return q * math.fsum(
+            v * (pi - ni + di)
+            for v, ni, pi, di in zip(values("NodeVolume"), values(n), values(p), values("NetDoping"))
+        )
+
+    def ac_admittance(self, contact: str, frequency_hz: float) -> complex:
+        """Small-signal admittance Y = I/V (A/cm^2 per V in 1D) of a ``circuit=True`` contact.
+
+        A 1 V AC excitation is applied on this contact's source only, around the present DC
+        solution; I is the current into the device (Y = j w C for a capacitor).
+        """
+        typed = self._contact(contact)
+        if typed is None or not typed.circuit:
+            raise ValueError(f"contact {contact!r} is not a circuit=True contact")
+        for c in self.contacts:
+            if c.circuit:
+                circuit_alter(
+                    name=contacts_mod.source_name(c.name),
+                    param="acreal",
+                    value=1.0 if c.name == contact else 0.0,
+                )
+        try:
+            devsim_solve(type="ac", frequency=float(frequency_hz))
+            node = f"{contacts_mod.source_name(contact)}.I"
+            current = complex(
+                get_circuit_node_value(node=node, solution="ssac_real"),
+                get_circuit_node_value(node=node, solution="ssac_imag"),
+            )
+        finally:
+            circuit_alter(name=contacts_mod.source_name(contact), param="acreal", value=0.0)
+        # DEVSIM's source current flows from n1 through the source: the device draws -I.
+        return -current
+
+    # --- typed physics --------------------------------------------------------------------------
+    def setup_physics(self) -> None:
+        """Materials, equations, interfaces and contacts of the typed path; solve equilibrium.
+
+        Stage 1 (Poisson, equilibrium carriers) as DEVSIM ``testing/mos_2d.py``: silicon and
+        oxide regions, every contact, continuous potential on every interface between two
+        regions with equations; solve. Stage 2: drift-diffusion on silicon, the ohmic contacts'
+        carrier conditions, carrier continuity on silicon/silicon interfaces; solve.
+        """
+        device = self.device
+        classes = self.region_classes
+        for region, region_class in classes.items():
+            if region_class == "silicon":
+                materials.set_silicon(
+                    device, region, **materials.silicon_parameters(self.constants)
+                )
+            elif region_class == "oxide":
+                materials.set_oxide(device, region, **materials.oxide_parameters(self.constants))
+        placed = {}
+        for contact in self.contacts:
+            (region,) = get_region_list(device=device, contact=contact.name)
+            contacts_mod.check_contact_region(contact, region, classes.get(region))
+            placed[contact.name] = region
+            if contact.circuit:
+                circuit_element(
+                    name=contacts_mod.source_name(contact.name),
+                    n1=contacts_mod.bias_name(contact.name),
+                    n2="0",
+                    value=0.0,
+                    acreal=0.0,
+                )
+            else:
+                set_parameter(
+                    device=device, name=contacts_mod.bias_name(contact.name), value=0.0
+                )
+        for region, region_class in classes.items():
+            if region_class == "silicon":
+                materials.create_silicon_potential_only(device, region)
+            elif region_class == "oxide":
+                materials.create_oxide_potential_only(device, region)
+        for contact in self.contacts:
+            region = placed[contact.name]
+            contacts_mod.create_contact_potential_only(device, region, contact, classes[region])
+        interface_kinds = {}
+        for interface in get_interface_list(device=device):
+            r0, r1 = get_region_list(device=device, interface=interface)
+            kind = contacts_mod.interface_kind(classes.get(r0), classes.get(r1))
+            interface_kinds[interface] = kind
+            if kind is not None:
+                contacts_mod.create_interface_potential(device, interface)
+        self.solve_dc()
+
+        silicon = [r for r, k in classes.items() if k == "silicon"]
+        if not silicon:
+            return
+        for region in silicon:
+            materials.create_silicon_drift_diffusion(device, region)
+        for contact in self.contacts:
+            region = placed[contact.name]
+            contacts_mod.create_contact_drift_diffusion(device, region, contact, classes[region])
+        for interface, kind in interface_kinds.items():
+            if kind == "drift_diffusion":
+                contacts_mod.create_interface_carriers(device, interface)
+        self.solve_dc()
+
+    # --- gplugins v0.8.0 physics (contact_info) -------------------------------------------------
     def set_parameters(self, region, device) -> None:
-        """Set parameters for 300 K."""
-        simple_physics.SetSiliconParameters(device, region, 300)
+        """Silicon parameters from ``self.constants`` (v0.8.0: simple_physics' values, 300 K)."""
+        materials.set_silicon(device, region, **materials.silicon_parameters(self.constants))
 
     def initial_solution(self, device, region, circuit_contacts=None) -> None:
         # Create Potential, Potential@n0, Potential@n1
@@ -204,7 +468,8 @@ class DDComponent:
             full_layer_stack=self.full_layer_stack,
             physical_layer_stack=self.physical_layer_stack,
             doping_info=self.doping_info,
-            contact_info=self.contact_info,
+            contact_info=self.contact_info if self.legacy else None,
+            contacts=None if self.legacy else self.contacts,
             resolutions=self.resolutions,
             mesh_scaling_factor=self.mesh_scaling_factor,
             background_tag=self.background_tag,
@@ -215,16 +480,36 @@ class DDComponent:
         )
         device = self.device
 
-        # The silicon models need NetDoping, so they apply only to the regions that have it,
-        # and the silicon/silicon interface model only to interfaces between two of them.
-        # create_2Duz_simulation sets NetDoping on the "si" regions and (to 0) on the contact
-        # regions, which are solved as intrinsic silicon as in v0.8.0; other regions (e.g.
-        # oxide) have none and get no silicon model.
+        if not self.legacy:
+            # Silicon: the regions with NetDoping; oxide: by material; the rest (electrodes,
+            # unknown materials) get no equations.
+            material_of = {r: m for m, rs in self.regions.items() for r in rs}
+            self.region_classes = {
+                r: "silicon"
+                if "NetDoping" in get_node_model_list(device=device, region=r)
+                else (
+                    "oxide"
+                    if materials.material_class(material_of.get(r)) == "oxide"
+                    else None
+                )
+                for r in get_region_list(device=device)
+            }
+            self.setup_physics()
+            return
+
+        # gplugins v0.8.0 (contact_info): the silicon models need NetDoping, so they apply
+        # only to the regions that have it, and the silicon/silicon interface model only to
+        # interfaces between two of them. create_2Duz_simulation sets NetDoping on the "si"
+        # regions and (to 0) on the contact regions, which are solved as intrinsic silicon as
+        # in v0.8.0; other regions (e.g. oxide) have none and get no silicon model.
         silicon = [
             r
             for r in get_region_list(device=device)
             if "NetDoping" in get_node_model_list(device=device, region=r)
         ]
+        self.region_classes = {
+            r: "silicon" if r in silicon else None for r in get_region_list(device=device)
+        }
 
         for region in silicon:
             self.set_parameters(device=device, region=region)
@@ -246,12 +531,7 @@ class DDComponent:
 
         self.save_device("debug.dat")
 
-        solve(
-            type="dc",
-            absolute_error=self.atol,
-            relative_error=self.rtol,
-            maximum_iterations=self.max_iter,
-        )
+        self.solve_dc()
 
     def ramp_voltage(
         self, Vfinal: float, Vstep: float, Vinit: float = 0.0, contact_name="cathode"
@@ -259,17 +539,8 @@ class DDComponent:
         """Ramps the solution from Vi to Vf."""
         V = Vinit
         while np.abs(V) <= np.abs(Vfinal):
-            set_parameter(
-                device=self.device,
-                name=simple_physics.GetContactBiasName(contact_name),
-                value=V,
-            )
-            solve(
-                type="dc",
-                absolute_error=self.atol,
-                relative_error=self.rtol,
-                maximum_iterations=self.max_iter,
-            )
+            self.set_bias(contact_name, V)
+            self.solve_dc()
             V += Vstep
 
     def get_node_index(self, region_name):
@@ -334,9 +605,11 @@ class DDComponent:
         write_devices(file=filepath, type="tecplot")
 
     def delete_device(self) -> None:
-        """Delete this devsim device and mesh."""
+        """Delete this devsim device and mesh, and the (global) circuit if it has circuit contacts."""
         delete_mesh(mesh=self.devsim_mesh_name)
         delete_device(device=self.device)
+        if any(c.circuit for c in self.contacts):
+            contacts_mod.delete_circuit()
 
     def get_refined_mesh(
         self,
