@@ -49,7 +49,12 @@ DEVSIM's circuit is global: ``delete_device`` and :func:`~gplugins.devsim.contac
 delete the whole circuit, and source and node names are not per device. So the AC sweep names
 its sources ``Vcv__<device>__<contact>`` on nodes ``cv__<device>__<contact>``, refuses to run
 while any device's contact uses a circuit node, and deletes the circuit when it ends. The
-device must have been built with ``circuit=False`` contacts.
+device must have been built with ``circuit=False`` contacts (else ``ValueError``, both
+methods). A pre-existing standalone circuit (elements attached to no device) cannot be seen
+beforehand (probing with ``get_circuit_node_list`` is unsafe without a circuit), but DEVSIM
+refuses to add circuit nodes once an analysis has been performed with a circuit present: the
+first source then fails, the AC sweep raises ``ValueError`` naming that likely cause, and
+nothing is deleted (the circuit is deleted only if one of the sweep's own sources was added).
 
 The sweep leaves the device as it found it: its equations, contact biases and solution are
 restored afterwards (also when it raises), as is DEVSIM's extended precision setting (which
@@ -123,13 +128,17 @@ class CVResult:
 class CVConvergenceError(ConvergenceError):
     """One or more bias points of a C-V sweep did not converge at the requested tolerances.
 
-    ``points`` lists those gate voltages (V) in sweep order; ``reasons`` maps each to why.
+    ``points`` lists those gate voltages (V) in sweep order (a repeated vg appears once per
+    occurrence); ``reasons`` is ``[(index, vg, reason), ...]``, the same points with their
+    index in the sweep's ``vg`` and why each failed.
     """
 
-    def __init__(self, points: Sequence[float], reasons: Mapping[float, str] | None = None) -> None:
+    def __init__(
+        self, points: Sequence[float], reasons: Sequence[tuple[int, float, str]] | None = None
+    ) -> None:
         self.points = [float(v) for v in points]
-        self.reasons = dict(reasons or {})
-        detail = "; ".join(f"vg={v!r}: {self.reasons.get(v, '')}" for v in self.points)
+        self.reasons = [(int(i), float(v), str(r)) for i, v, r in (reasons or ())]
+        detail = "; ".join(f"vg[{i}]={v!r}: {r}" for i, v, r in self.reasons) or repr(self.points)
         super().__init__(
             f"C-V sweep: {len(self.points)} bias point(s) did not converge: {detail}", None
         )
@@ -139,8 +148,12 @@ class CVConvergenceError(ConvergenceError):
 # Solving with per-equation checks
 # --------------------------------------------------------------------------------------------
 def _errors(info: dict, device: str) -> tuple[float, float]:
-    """(largest relative error, largest PotentialEquation absolute error) of the last iteration."""
-    rel, pot_abs = 0.0, 0.0
+    """(largest relative error, largest PotentialEquation absolute error) of the last iteration.
+
+    Raises :class:`ConvergenceError` if the last iteration has no ``PotentialEquation`` entry for
+    ``device``, so the check can never pass vacuously.
+    """
+    rel, pot_abs, seen = 0.0, 0.0, False
     for dev in info["iterations"][-1]["devices"]:
         if dev["name"] != device:
             continue
@@ -149,6 +162,13 @@ def _errors(info: dict, device: str) -> tuple[float, float]:
                 rel = max(rel, eq["relative_error"])
                 if eq["name"] == "PotentialEquation":
                     pot_abs = max(pot_abs, eq["absolute_error"])
+                    seen = True
+    if not seen:
+        raise ConvergenceError(
+            f"the solve info has no PotentialEquation errors for device {device!r}; "
+            "the tolerances cannot be checked",
+            info,
+        )
     return rel, pot_abs
 
 
@@ -262,6 +282,7 @@ class _Session:
         self.gate_regions = self._gate_side_regions()
         self.mode = "dd"
         self.circuit = False
+        self.added_sources = 0
         self.v_gate = float(self.biases[gate])
         dim = devsim.get_dimension(device=device)
         if dim not in (1, 2):
@@ -420,11 +441,20 @@ class _Session:
         for eqs in self.ieqs.values():
             for cmd in eqs.values():
                 devsim.interface_equation(**cmd)
+        self.circuit = True  # from here on restore() cleans up, also after a partial failure
         for c in self.contacts:
-            devsim.circuit_element(
-                name=self.source[c], n1=self.node[c], n2="0", value=0.0, acreal=0.0
-            )
-        self.circuit = True
+            try:
+                devsim.circuit_element(
+                    name=self.source[c], n1=self.node[c], n2="0", value=0.0, acreal=0.0
+                )
+            except devsim.error as e:
+                raise ValueError(
+                    f"cannot add the AC sweep's source {self.source[c]!r}: {e}. The likely "
+                    "cause is a pre-existing global DEVSIM circuit (e.g. a standalone "
+                    "circuit_element) present during an earlier solve; DEVSIM's circuit is "
+                    "global and an AC sweep needs it to itself"
+                ) from e
+            self.added_sources += 1
         for c in self.contacts:
             devsim.set_parameter(device=device, name=contacts_mod.bias_name(c), value=0.0)
             for e, cmd in self.ceqs[c].items():
@@ -488,8 +518,12 @@ class _Session:
                 model = f"cv_{eqs['PotentialEquation']['node_model']}"
                 for name in (model, f"{model}:Potential", f"{model}:{self.node[c]}"):
                     model_create.CreateContactNodeModel(device, c, name, "0")
-            contacts_mod.delete_circuit()
+            if self.added_sources:
+                # Our sources cannot be removed one by one: the (global) circuit goes. If none
+                # was added, a pre-existing circuit is left alone.
+                contacts_mod.delete_circuit()
             self.circuit = False
+            self.added_sources = 0
         for r in self.silicon:
             models = devsim.get_node_model_list(device=device, region=r)
             for name in (_CHARGE, _P, _N):
@@ -623,7 +657,7 @@ def sweep_cv(
         session.restore()
     if failed:
         order = sorted(failed)
-        raise CVConvergenceError([vg[i] for i in order], {vg[i]: failed[i] for i in order})
+        raise CVConvergenceError([vg[i] for i in order], [(i, vg[i], failed[i]) for i in order])
     n = len(vg)
     return CVResult(
         vg=vg,
