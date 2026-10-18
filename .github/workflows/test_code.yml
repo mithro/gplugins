@@ -79,6 +79,8 @@ jobs:
           docker image prune --all --force
           df -h /
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Pull the TCAD image by digest
         run: |
           docker pull --quiet "$TCAD_IMAGE"
