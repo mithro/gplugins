@@ -27,9 +27,22 @@ jobs:
       fail-fast: false
       max-parallel: 12
       matrix:
-        plugin: [emode, femwell, meow, sax, tidy3d, klayout, vlsir, path_length_analysis, elmer, ansys, comsol]
+        plugin: [emode, meow, sax, tidy3d, klayout, vlsir, path_length_analysis, ansys, comsol]
         os: [ubuntu-latest]
         python-version: [3.12]
+        # The extras that use meshwell (femwell, meshwell, elmer) need meshwell 2.5, which
+        # needs Python >= 3.13 (on older Python, femwell's own unpinned dependency resolves
+        # meshwell 2.3.6, which lacks meshwell.orchestrator.cad).
+        include:
+          - plugin: femwell
+            os: ubuntu-latest
+            python-version: 3.13
+          - plugin: meshwell
+            os: ubuntu-latest
+            python-version: 3.13
+          - plugin: elmer
+            os: ubuntu-latest
+            python-version: 3.13
         exclude:
           - plugin: femwell
             os: macos-latest

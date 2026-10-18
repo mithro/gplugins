@@ -2,10 +2,10 @@ uv:
 	curl -LsSf https://astral.sh/uv/install.sh | sh
 
 venv:
-	uv venv --python 3.11
+	uv venv --python 3.13
 
 install:
-	uv venv --python 3.11
+	uv venv --python 3.13
 	uv pip install -e .[dev,docs,emode,femwell,meow,sax,tidy3d,klayout,vlsir]
 	uv run pre-commit install
 

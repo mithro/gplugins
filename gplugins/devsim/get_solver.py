@@ -424,18 +424,21 @@ class DDComponent:
 
 if __name__ == "__main__":
     import gdsfactory as gf
+    from gdsfactory.gpdk import LAYER, PDK
+
+    PDK.activate()
 
     # We choose a representative subdomain of the component
     waveguide = gf.Component()
     waveguide.add_ref(
         gf.functions.trim(
-            component=gf.components.straight_pn(length=10, taper=None),
+            component=gf.components.straight_pn(length=10, taper=None).copy(),
             domain=[[3, -4], [3, 4], [5, 4], [5, -4]],
         )
     )
 
     # We will restrict the physical mesh to a subset of layers:
-    layermap = gf.tech.LayerMap()
+    layermap = LAYER
     physical_layer_stack = LayerStack(
         layers={
             k: get_layer_stack().layers[k]
@@ -456,17 +459,27 @@ if __name__ == "__main__":
     cathode_layer = (106, 0)
 
     # We will generate contacts where the vias intersect heavy doping
-    via_contact_locations = waveguide.extract(layermap.VIAC)
-    NPP_location = waveguide.extract(layermap.NPP)
-    PPP_location = waveguide.extract(layermap.PPP)
+    via_contact_locations = waveguide.extract([layermap.VIAC])
+    NPP_location = waveguide.extract([layermap.NPP])
+    PPP_location = waveguide.extract([layermap.PPP])
     waveguide.add_ref(
-        gf.geometry.boolean(
-            via_contact_locations, NPP_location, operation="AND", layer=anode_layer
+        gf.boolean(
+            via_contact_locations,
+            NPP_location,
+            operation="and",
+            layer=anode_layer,
+            layer1=layermap.VIAC,
+            layer2=layermap.NPP,
         )
     )
     waveguide.add_ref(
-        gf.geometry.boolean(
-            via_contact_locations, PPP_location, operation="AND", layer=cathode_layer
+        gf.boolean(
+            via_contact_locations,
+            PPP_location,
+            operation="and",
+            layer=cathode_layer,
+            layer1=layermap.VIAC,
+            layer2=layermap.PPP,
         )
     )
     contact_info = {
@@ -481,8 +494,6 @@ if __name__ == "__main__":
             "physical_layerlevel_to_contact": "slab90",
         },
     }
-
-    waveguide.show()
 
     # Initial meshing
     resolutions = {

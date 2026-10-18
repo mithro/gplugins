@@ -26,8 +26,8 @@ from gplugins.common.utils.async_helpers import (
     run_async_with_event_loop,
 )
 from gplugins.meshwell.get_meshwell_3D import get_meshwell_prisms
-from meshwell.cad import cad
 from meshwell.mesh import mesh
+from meshwell.orchestrator import cad
 from gdsfactory.technology.layer_stack import LogicalLayer
 
 DRIVE_JSON = "driven.json"
@@ -370,7 +370,7 @@ def run_scattering_simulation_palace(
             n_threads=n_processes,
         )
         cad(
-            entities_list=prisms,
+            entities=prisms,
             output_file=(
                 cad_output := (simulation_folder / filename).with_suffix(".xao")
             ),

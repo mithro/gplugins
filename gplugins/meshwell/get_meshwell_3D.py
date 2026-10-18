@@ -108,8 +108,8 @@ if __name__ == "__main__":
     from gdsfactory.components import ge_detector_straight_si_contacts, add_frame
     from gdsfactory.gpdk.layer_stack import get_layer_stack
     from gdsfactory.gpdk.layer_map import LAYER
-    from meshwell.cad import cad
     from meshwell.mesh import mesh
+    from meshwell.orchestrator import cad
 
 
     for component in [ge_detector_straight_si_contacts, add_frame]:
@@ -120,7 +120,7 @@ if __name__ == "__main__":
             name_by="layer",
         )
 
-        cad(entities_list=prisms, output_file=f"meshwell_prisms_3D_{c.name}.xao")
+        cad(entities=prisms, output_file=f"meshwell_prisms_3D_{c.name}.xao")
         mesh(
             input_file=f"meshwell_prisms_3D_{c.name}.xao",
             output_file=f"meshwell_prisms_3D_{c.name}.msh",

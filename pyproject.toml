@@ -44,7 +44,8 @@ dev = [
   "pytest-cov",
   "pytest_regressions"
 ]
-# meshwell 2.5 (the devsim mesher) needs Python >= 3.13. tidy3d and pyvista are only for
+# meshwell 2.5 needs Python >= 3.13, so every extra that uses it (devsim, elmer, femwell,
+# meshwell) installs it only there. tidy3d and pyvista are only for
 # PINWaveguide.make_waveguide (mode solves) and plot/list_fields.
 devsim = [
   "devsim>=2.11.1; python_version >= '3.13'",
@@ -65,15 +66,15 @@ docs = [
   "scikit-learn",
   "zensical>=0.0.46,<0.1.0"
 ]
-elmer = ["jinja2", "meshwell~=2.1.1", "nest-asyncio", "pandas"]
+elmer = ["jinja2", "meshwell~=2.5; python_version >= '3.13'", "nest-asyncio", "pandas"]
 emode = ["emodeconnection>=1.1.11"]
-femwell = ["femwell~=0.1.11", "meshwell~=2.1.1"]
+femwell = ["femwell~=0.1.11", "meshwell~=2.5; python_version >= '3.13'"]
 gfviz = ["jinja2", "fastapi", "shapely", "natsort"]
 klayout = ["klayout", "pyvis<=0.3.2", "vlsir", "vlsirtools", "gitpython"]
 luminescent = ["luminescent>=0.2.12,<4.3.0", "sortedcontainers"]
 maintainer = ["mypy", "tbump", "towncrier"]
 meow = ["meow-sim>=0.15", "sax>=0.17,<0.19", "tidy3d>=2.11.1,<2.13.0"]
-meshwell = ["shapely", "meshwell~=2.1.1"]
+meshwell = ["shapely", "meshwell~=2.5; python_version >= '3.13'"]
 path_length_analysis = ["bokeh", "numba>=0.60", "shapely"]
 sax = ["sax>=0.17,<0.19"]
 schematic = ["bokeh", "ipywidgets", "natsort"]
@@ -251,11 +252,3 @@ showcontent = true
 directory = "fixed"
 name = "Fixed"
 showcontent = true
-
-[tool.uv]
-# The devsim extra needs meshwell 2.5; elmer, femwell and meshwell pin meshwell 2.1.
-conflicts = [
-  [{ extra = "devsim" }, { extra = "elmer" }],
-  [{ extra = "devsim" }, { extra = "femwell" }],
-  [{ extra = "devsim" }, { extra = "meshwell" }]
-]
