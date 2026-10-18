@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from itertools import combinations
 
 import numpy as np
@@ -16,13 +17,20 @@ from devsim import (
     write_devices,
 )
 from gdsfactory import Component
-from gdsfactory.technology import LayerLevel, LayerStack, LogicalLayer
+from gdsfactory.technology import LayerStack, LogicalLayer
 from meshwell.polysurface import PolySurface
 from meshwell.resolution import ResolutionSpec
 from scipy.interpolate import NearestNDInterpolator
 from shapely.geometry import LineString, Polygon
 
 from gplugins.common.base_models.component import fuse_polygons
+from gplugins.devsim.contacts import (
+    Contact,
+    InterfaceRef,
+    LayerRef,
+    contacts_from_contact_info,
+    gds_layer,
+)
 from gplugins.devsim.doping import get_doping_info_generic
 from gplugins.devsim.meshing import legacy_resolutions, mesh_xsection
 from gplugins.meshwell import get_meshwell_cross_section, get_u_bounds_polygons
@@ -36,7 +44,7 @@ def create_2Duz_simulation(
     full_layer_stack: LayerStack,
     physical_layer_stack: LayerStack,
     doping_info,  # Dict[str, DopingLayerLevel],
-    contact_info,
+    contact_info=None,
     resolutions: dict[str, list[ResolutionSpec]] | dict[str, dict] | None = None,
     mesh_scaling_factor: float = um_to_cm,
     default_resolution_min: float = 0.001,
@@ -49,6 +57,7 @@ def create_2Duz_simulation(
     devsim_simulation_filename: str = "devsim.dat",
     global_meshsize_array: np.array | None = None,
     global_meshsize_interpolant_func: callable | None = NearestNDInterpolator,
+    contacts: Sequence[Contact] | None = None,
 ):
     """Mesh the u-z cross-section of ``component`` along ``xsection_bounds`` into DEVSIM.
 
@@ -56,6 +65,15 @@ def create_2Duz_simulation(
     (single-threaded, pinned gmsh seed, MSH 2.2), in units of ``mesh_scaling_factor`` (cm).
 
     Args:
+        contacts: typed contacts (:class:`gplugins.devsim.contacts.Contact`). A
+            ``LayerRef(gds_layer)`` contact is the boundary between the one level of
+            ``physical_layer_stack`` drawn on that GDS layer (the electrode, which the caller
+            adds to the stack) and the one region it touches, placed on that region. An
+            ``InterfaceRef(a, b)`` contact is the ``a___b`` (or ``b___a``) group, placed on
+            ``b``; ``InterfaceRef(a, None)`` is ``a___None``, placed on ``a``.
+        contact_info: **deprecated** gplugins <= 0.8 contact dict (see
+            :func:`gplugins.devsim.contacts.contacts_from_contact_info`); its contact regions
+            get ``NetDoping`` = 0, as in v0.8.0. Not together with ``contacts``.
         resolutions: meshwell resolution specs by layer name, e.g.
             ``{"core": [ConstantInField(resolution=0.02, apply_to="surfaces")]}``. The
             gplugins <= 0.8 form ``{"core": {"resolution": 0.02, "distance": 1}}`` is also
@@ -76,21 +94,19 @@ def create_2Duz_simulation(
     Returns:
         ``(device name, {material: [region names]}, {(material, material): [interfaces]})``.
     """
-    # Replace relevant physical entities by contacts
+    if contacts is not None and contact_info:
+        raise ValueError("pass contacts or contact_info, not both")
+    # Replace relevant physical entities by contacts (deprecated contact_info: the adapter
+    # gives the gplugins <= 0.8 contact levels and InterfaceRef contacts)
     simulation_layertack = physical_layer_stack
-    for contact_name, contact_dict in contact_info.items():
-        contact_layer = full_layer_stack.layers[
-            contact_dict["physical_layerlevel_to_replace"]
-        ]
-        layerlevel = LayerLevel(
-            layer=contact_dict["gds_layer"],
-            thickness=contact_layer.thickness,
-            zmin=contact_layer.zmin,
-            material=contact_layer.material,
-            sidewall_angle=contact_layer.sidewall_angle,
-            info=contact_layer.info,
-        )
-        simulation_layertack.layers[contact_name] = layerlevel
+    legacy_contact_regions: list[str] = []
+    if contact_info:
+        contacts, levels = contacts_from_contact_info(contact_info, full_layer_stack)
+        for contact_name, layerlevel in levels.items():
+            simulation_layertack.layers[contact_name] = layerlevel
+        legacy_contact_regions = list(levels)
+    contacts = list(contacts or ())
+    electrodes = _resolve_electrodes(contacts, simulation_layertack, background_tag)
 
     # Get structural mesh (meshwell 2.5, single-threaded; see gplugins.devsim.meshing)
     surfaces = xsection_entities(
@@ -155,21 +171,18 @@ def create_2Duz_simulation(
         regions[background_tag] = [background_tag]
 
     # Contacts
-    contacts = {}
-    for contact_name, contact in contact_info.items():
-        layer1 = contact_name
-        layer2 = contact["physical_layerlevel_to_contact"]
-        interface = f"{layer1}___{layer2}"
-        if interface not in physical_names:
-            interface = f"{layer2}___{layer1}"
-        add_gmsh_contact(
-            gmsh_name=interface,
-            material=simulation_layertack.layers[contact_name].material,
-            mesh=devsim_mesh_name,
-            name=contact_name,
-            region=layer2,
+    region_names = set(simulation_layer_stack_dict)
+    for contact in contacts:
+        gmsh_name, region, material = _contact_group(
+            contact, electrodes, physical_names, region_names, simulation_layer_stack_dict
         )
-        contacts[contact_name] = interface
+        add_gmsh_contact(
+            gmsh_name=gmsh_name,
+            material=material,
+            mesh=devsim_mesh_name,
+            name=contact.name,
+            region=region,
+        )
 
     # Interfaces (that are not contacts), labeled by material-material
     interfaces = {}
@@ -241,8 +254,8 @@ def create_2Duz_simulation(
             values=net_doping,
         )
 
-    # Assign doping field contact
-    for contact_name in contacts:
+    # Assign doping field contact (contact_info only: v0.8.0 solves them as intrinsic silicon)
+    for contact_name in legacy_contact_regions:
         xpos = get_node_model_values(
             device=devsim_device_name, region=contact_name, name="x"
         )
@@ -273,6 +286,78 @@ def create_2Duz_simulation(
         write_devices(file=devsim_simulation_filename, type="tecplot")
 
     return devsim_device_name, regions, interfaces
+
+
+def _resolve_electrodes(
+    contacts: Sequence[Contact], layer_stack: LayerStack, background_tag: str | None
+) -> dict[str, str]:
+    """``{contact: electrode level}`` for the ``LayerRef`` contacts; checks every contact.
+
+    Runs before meshing, so a bad contact fails fast.
+    """
+    names = list(layer_stack.layers) + ([background_tag] if background_tag else [])
+    seen: set[str] = set()
+    electrodes = {}
+    for contact in contacts:
+        if contact.name in seen:
+            raise ValueError(f"duplicate contact name {contact.name!r}")
+        seen.add(contact.name)
+        loc = contact.location
+        if isinstance(loc, LayerRef):
+            levels = [
+                name
+                for name, level in layer_stack.layers.items()
+                if gds_layer(level.layer) == loc.layer
+            ]
+            if len(levels) != 1:
+                raise ValueError(
+                    f"contact {contact.name!r}: {loc!r} must match exactly one level of the "
+                    f"simulated layer stack, found {levels or 'no level'}; add the electrode "
+                    "level (e.g. a via level on that GDS layer) to physical_layer_stack"
+                )
+            electrodes[contact.name] = levels[0]
+        else:
+            for region in (loc.a, loc.b):
+                if region is not None and region not in names:
+                    raise ValueError(
+                        f"contact {contact.name!r}: {loc!r} names {region!r}, which is not a "
+                        f"level of the simulated layer stack {names}"
+                    )
+    return electrodes
+
+
+def _contact_group(contact, electrodes, physical_names, region_names, stack_dict):
+    """``(gmsh group, region, material)`` of a contact on the meshed cross-section."""
+    loc = contact.location
+    if isinstance(loc, LayerRef):
+        a = electrodes[contact.name]
+        touching = []
+        for group in physical_names:
+            parts = group.split("___")
+            if len(parts) != 2:
+                continue
+            x, y = parts
+            if x == a and y != a and y in region_names:
+                touching.append((y, group))
+            elif y == a and x != a and x in region_names:
+                touching.append((x, group))
+        touching.sort()
+        if len(touching) != 1:
+            raise ValueError(
+                f"contact {contact.name!r}: electrode {a!r} must touch exactly one region, it "
+                f"touches {[o for o, _ in touching]}; use an InterfaceRef contact instead"
+            )
+        region, group = touching[0]
+        return group, region, stack_dict[a]["material"]
+    assert isinstance(loc, InterfaceRef)
+    for group in loc.gmsh_names:
+        if group in physical_names:
+            region = loc.a if loc.b is None else loc.b
+            material = "metal" if loc.b is None else stack_dict[loc.a]["material"]
+            return group, region, material
+    raise ValueError(
+        f"contact {contact.name!r}: the mesh has no {' or '.join(loc.gmsh_names)} boundary"
+    )
 
 
 def xsection_entities(

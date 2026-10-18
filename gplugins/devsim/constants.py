@@ -58,16 +58,38 @@ class Constants:
     """Physical constants of the TCAD models (see the module docstring for the citations)."""
 
     q_c: float = 1.602176634e-19
+    """Elementary charge (C). ``literature``: exact SI, CODATA 2018,
+    https://physics.nist.gov/cgi-bin/cuu/Value?e"""
     k_b_j_per_k: float = 1.380649e-23
+    """Boltzmann constant (J/K). ``literature``: exact SI, CODATA 2018,
+    https://physics.nist.gov/cgi-bin/cuu/Value?k"""
     eps0_f_per_cm: float = 8.8541878128e-14
+    """Vacuum permittivity (F/cm). ``literature``: CODATA 2018,
+    https://physics.nist.gov/cgi-bin/cuu/Value?ep0 (8.8541878128e-12 F/m)"""
     eps_si: float = 11.7
+    """Relative permittivity of silicon. ``literature``: Sze & Ng, *Physics of Semiconductor
+    Devices*, 3rd ed., Appendix, https://doi.org/10.1002/0470068329; equal to the BSIM4
+    EPSRSUB default (the card sets no EPSRSUB)."""
     eps_ox: float = 3.9
+    """Relative permittivity of the gate oxide. ``spice-card``: EPSROX,
+    ``sm141064.ngspice:37126`` (nfet_06v0.0)."""
     t_k: float = 298.15
+    """Temperature (K). ``spice-card``: TNOM 25 °C, ``sm141064.ngspice:37308``."""
     n_i300_cm3: float = 9.65e9
+    """Intrinsic density at 300 K (cm^-3). ``literature``: Altermatt et al., J. Appl. Phys. 93,
+    1598 (2003), https://doi.org/10.1063/1.1529297. Scaled to ``t_k`` by :attr:`n_i_cm3`."""
     mu_n_cm2_per_vs: float = 1417.0
+    """Electron mobility (cm^2/(V s)), constant. ``literature``: Masetti et al., IEEE TED 30,
+    764 (1983), mu_max, https://doi.org/10.1109/T-ED.1983.21207"""
     mu_p_cm2_per_vs: float = 470.5
+    """Hole mobility (cm^2/(V s)), constant. ``literature``: Masetti et al., IEEE TED 30, 764
+    (1983), mu_max, https://doi.org/10.1109/T-ED.1983.21207"""
     tau_n_s: float = 1e-5
+    """SRH electron lifetime (s), midgap trap (n1 = p1 = n_i). ``literature``: Sze & Ng ch. 1
+    (SRH recombination), https://doi.org/10.1002/0470068329. Page number unverified."""
     tau_p_s: float = 1e-5
+    """SRH hole lifetime (s), midgap trap (n1 = p1 = n_i). ``literature``: Sze & Ng ch. 1
+    (SRH recombination), https://doi.org/10.1002/0470068329. Page number unverified."""
 
     @property
     def vt_v(self) -> float:
@@ -76,7 +98,12 @@ class Constants:
 
     @property
     def n_i_cm3(self) -> float:
-        """Intrinsic density at ``t_k`` (cm⁻³), Misiakos & Tsamakis scaling of ``n_i300_cm3``."""
+        """Intrinsic density at ``t_k`` (cm⁻³), Misiakos & Tsamakis scaling of ``n_i300_cm3``.
+
+        n_i300·(T/300)^2.54·exp(-6726 K·(1/T - 1/300 K)): ``literature``, Misiakos & Tsamakis,
+        J. Appl. Phys. 74, 3293 (1993), https://doi.org/10.1063/1.354551, normalised to
+        Altermatt's 300 K value. 8.266e9 cm⁻³ at 298.15 K.
+        """
         t = self.t_k
         return (
             self.n_i300_cm3
