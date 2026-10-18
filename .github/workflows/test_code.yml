@@ -1,4 +1,10 @@
 name: Test code
+# mithro/gplugins fork (for gf180-tcad, https://github.com/mithro/gf180-tcad):
+# this is the fork's PR/main test workflow. It runs on GitHub-hosted runners
+# with no repository secrets (GITHUB_TOKEN is the per-run token GitHub
+# provides, read-only here). gplugins/devsim is still excluded from the matrix
+# and from pytest (pyproject.toml norecursedirs) until gf180-tcad Phase 2
+# Task 4 adds a devsim job that runs in the pinned gf180-tcad TCAD image.
 
 on:
   pull_request:
@@ -148,8 +154,5 @@ jobs:
       - name: Test with pytest
         run: |
           make cov
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+      # mithro/gplugins fork: the Codecov upload is removed. It used the
+      # upstream CODECOV_TOKEN secret and publishes coverage to codecov.io.
