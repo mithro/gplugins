@@ -30,7 +30,7 @@ field                       value                           provenance
                                                             Phys. 93, 1598 (2003),
                                                             https://doi.org/10.1063/1.1529297
 ``n_i_cm3`` (property)      8.266e9 cm⁻³ at 298.15 K        ``literature``: n_i300·(T/300)^2.54·
-                                                            exp(−6726 K·(1/T − 1/300 K)), the Misiakos &
+                                                            exp(-6726 K·(1/T - 1/300 K)), the Misiakos &
                                                             Tsamakis T-dependence, J. Appl. Phys. 74,
                                                             3293 (1993),
                                                             https://doi.org/10.1063/1.354551,
@@ -78,7 +78,11 @@ class Constants:
     def n_i_cm3(self) -> float:
         """Intrinsic density at ``t_k`` (cm⁻³), Misiakos & Tsamakis scaling of ``n_i300_cm3``."""
         t = self.t_k
-        return self.n_i300_cm3 * (t / 300.0) ** 2.54 * math.exp(-6726.0 * (1 / t - 1 / 300.0))
+        return (
+            self.n_i300_cm3
+            * (t / 300.0) ** 2.54
+            * math.exp(-6726.0 * (1 / t - 1 / 300.0))
+        )
 
 
 # The constants used by every TCAD calculation of the plugin.
