@@ -64,7 +64,7 @@ if __name__ == "__main__":
     # TODO: Update this example to use the new meshwell API
     # The old gplugins.gmsh.get_mesh has been replaced with:
     # 1. get_meshwell_cross_section() to generate cross-section surfaces
-    # 2. meshwell.cad.cad() to create CAD file
+    # 2. meshwell.orchestrator.cad() to create CAD file
     # 3. meshwell.mesh.mesh() to create mesh file
     # See gplugins/femwell/mode_solver.py for an example of the new API
     pass

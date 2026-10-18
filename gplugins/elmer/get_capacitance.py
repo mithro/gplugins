@@ -14,8 +14,8 @@ import gdsfactory as gf
 import gmsh
 from gdsfactory.technology import LayerStack
 from jinja2 import Environment, FileSystemLoader
-from meshwell.cad import cad
 from meshwell.mesh import mesh
+from meshwell.orchestrator import cad
 from numpy import fill_diagonal, isfinite
 from numpy.typing import NDArray
 from pandas import read_csv
@@ -645,7 +645,7 @@ def run_capacitive_simulation_elmer(
                 wafer_layer=None,
             )
             cad(
-                entities_list=prisms,
+                entities=prisms,
                 output_file=(
                     cad_output := (simulation_folder / filename).with_suffix(".xao")
                 ),

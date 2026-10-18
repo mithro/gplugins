@@ -4,8 +4,8 @@ import gdsfactory as gf
 
 from gdsfactory.components import bend_circular, add_frame
 from gdsfactory.gpdk.layer_stack import get_layer_stack
-from meshwell.cad import cad
 from meshwell.mesh import mesh
+from meshwell.orchestrator import cad
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from gplugins.meshwell import (
@@ -24,7 +24,7 @@ def test_prisms(component) -> None:
     with TemporaryDirectory() as tmp_dir:
         xao_file = Path(tmp_dir) / "meshwell_prisms_3D.xao"
         msh_file = Path(tmp_dir) / "meshwell_prisms_3D.msh"
-        cad(entities_list=prisms, output_file=xao_file)
+        cad(entities=prisms, output_file=xao_file)
         mesh(
             input_file=xao_file,
             output_file=msh_file,
@@ -59,7 +59,7 @@ def test_cross_section(component) -> None:
     with TemporaryDirectory() as tmp_dir:
         xao_file = Path(tmp_dir) / "meshwell_prisms_3D.xao"
         msh_file = Path(tmp_dir) / "meshwell_prisms_3D.msh"
-        cad(entities_list=surfaces, output_file=xao_file)
+        cad(entities=surfaces, output_file=xao_file)
         mesh(
             input_file=xao_file,
             output_file=msh_file,

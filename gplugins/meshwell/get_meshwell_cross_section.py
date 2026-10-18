@@ -207,8 +207,8 @@ if __name__ == "__main__":
     from gdsfactory.components import ge_detector_straight_si_contacts
     from gdsfactory.gpdk.layer_stack import get_layer_stack
     from gdsfactory.gpdk.layer_map import LAYER
-    from meshwell.cad import cad
     from meshwell.mesh import mesh
+    from meshwell.orchestrator import cad
 
     # Cross-section surfaces (new functionality)
     component = ge_detector_straight_si_contacts()
@@ -225,7 +225,7 @@ if __name__ == "__main__":
     )
 
     # Create CAD and mesh for cross-section
-    cad(entities_list=surfaces, output_file="meshwell_cross_section_2D.xao")
+    cad(entities=surfaces, output_file="meshwell_cross_section_2D.xao")
     mesh(input_file="meshwell_cross_section_2D.xao",
          output_file="meshwell_cross_section_2D.msh",
          default_characteristic_length=1000,

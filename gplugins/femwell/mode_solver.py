@@ -9,8 +9,8 @@ from femwell.maxwell.waveguide import Modes, compute_modes
 from gdsfactory.pdk import get_layer_stack
 from gdsfactory.technology import LayerStack
 from gdsfactory.typings import ComponentSpec, CrossSectionSpec, PathType
-from meshwell.cad import cad
 from meshwell.mesh import mesh as mesh_func
+from meshwell.orchestrator import cad
 from shapely.geometry import LineString
 from skfem import (
     Basis,
@@ -159,7 +159,7 @@ def compute_component_slice_modes(
     )
     with tempfile.TemporaryDirectory() as tmpdirname:
         tmpdirname = Path(tmpdirname)
-        cad(entities_list=surfaces, output_file=tmpdirname / "temp.xao")
+        cad(entities=surfaces, output_file=tmpdirname / "temp.xao")
         mesh_func(
             input_file=tmpdirname / "temp.xao",
             output_file=MESH_FILENAME,

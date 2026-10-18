@@ -32,8 +32,8 @@ from gplugins.common.utils.get_component_with_net_layers import (
 )
 from gdsfactory.config import home
 from gplugins.meshwell.get_meshwell_3D import get_meshwell_prisms
-from meshwell.cad import cad
 from meshwell.mesh import mesh
+from meshwell.orchestrator import cad
 from gdsfactory import logger
 
 ELECTROSTATIC_JSON = "electrostatic.json"
@@ -305,7 +305,7 @@ def run_capacitive_simulation_palace(
             layer_stack=layer_stack,
         )
         cad(
-            entities_list=prisms,
+            entities=prisms,
             output_file=(
                 cad_output := (simulation_folder / filename).with_suffix(".xao")
             ),
