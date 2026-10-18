@@ -7,12 +7,12 @@ import devsim
 import numpy as np
 import pytest
 from devsim.python_packages import model_create
-from scipy import special
 from gdsfactory.technology.processes import (
     DopingConstant,
     ImplantGaussian,
     ImplantPhysical,
 )
+from scipy import special
 
 from gplugins.devsim import doping
 from gplugins.devsim.constants import CONSTANTS
@@ -192,13 +192,15 @@ def test_gaussian_from_dose() -> None:
     [
         doping.gaussian(peak=3e18, depth=0.15, straggle=0.04),
         doping.erfc(surface=1e20, length=0.08),
-        doping.constant(1.7e17, ymin=0.1, ymax=0.4),
+        # box edges off the 0.05 um mesh lines: at a node exactly on a sharp edge, the
+        # included/excluded decision depends on last-ulp rounding of the depth arithmetic
+        doping.constant(1.7e17, ymin=0.12, ymax=0.43),
         doping.gaussian(peak=1e18, depth=0.2, straggle=0.05)
         * doping.lateral(0.05, xmin=0.0, xmax=1.0),
         doping.lateral(0.05, xmin=0.2) * doping.gaussian(1e18, 0.3, 0.1),
         doping.lateral(0.05, xmax=0.5) * doping.constant(1e17),
         doping.lateral(0.0, xmin=0.0) * doping.constant(1e16),
-        doping.lateral(0.0, xmax=0.5) * doping.constant(1e16, ymax=0.5),
+        doping.lateral(0.0, xmax=0.5) * doping.constant(1e16, ymax=0.47),
         doping.gaussian(1e18, 0.3, 0.1)
         + doping.erfc(1e19, 0.1)
         + doping.constant(1e15),
@@ -237,8 +239,7 @@ def test_devsim_expression_equals_python(
         surface_um=surface_um,
         depth_sign=depth_sign,
     )
-    # the same arithmetic as assign_doping (cm * 1e4), so that nodes lying exactly on a box
-    # edge round the same way
+    # cm -> um as assign_doping does it (cm * 1e4)
     x_um, y_um = _values(d, "x") * 1e4, _values(d, "y") * 1e4
     depth = depth_sign * (y_um - surface_um)
     assert depth.min() == pytest.approx(
