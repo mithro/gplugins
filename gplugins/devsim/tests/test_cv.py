@@ -169,7 +169,7 @@ def test_ac_inversion_is_hf(case) -> None:
 def semiconductor_capacitance(psi_s: float, p0: float, n0: float) -> float:
     """|dQ_s/dpsi_s| (F/cm^2) of a p-type surface, exact Poisson-Boltzmann (Boltzmann carriers).
 
-    Sze & Ng, *Physics of Semiconductor Devices*, 3rd ed., ch. 4 (the MIS capacitor's space
+    Sze & Ng, *Physics of Semiconductor Devices*, 3rd ed., ch. 4 (the metal-insulator-semiconductor capacitor's space
     charge, Q_s = -sign(psi_s) sqrt(2) eps_s/(beta L_D) F(beta psi_s, n0/p0)),
     https://doi.org/10.1002/0470068329: with beta = 1/V_t and L_D = sqrt(eps_s V_t/(q p0)),
     F = sqrt((e^(-b) + b - 1) + (n0/p0)(e^b - b - 1)) and
