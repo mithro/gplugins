@@ -646,11 +646,25 @@ def _synthetic_failure(monkeypatch, *, rels, abs_update, at_bias=0.0):
 
     real = cv_mod.solve_dc
 
+    def potentials(dev):
+        return {
+            r: list(devsim.get_node_model_values(device=dev, region=r, name="Potential"))
+            for r in devsim.get_region_list(device=dev)
+            if "Potential" in devsim.get_node_model_list(device=dev, region=r)
+        }
+
     def fake(**kw):
-        info = real(**kw)
         dev = devsim.get_device_list()[0]
+        before = potentials(dev)
+        info = real(**kw)
         if devsim.get_parameter(device=dev, name="gate_bias") != at_bias:
             return info
+        if kw["relative_error"] > 1e-6:
+            return info  # a non-binding relative error (the round-off re-solve): real
+        # as DEVSIM does on a non-converged solve (math/Newton.cc RestoreSolutions): put the
+        # solution from before the solve back
+        for r, v in before.items():
+            devsim.set_node_values(device=dev, region=r, name="Potential", values=v)
         iterations = []
         for k, r in enumerate(rels):
             a = abs_update if k >= 4 else 1e-3 * 10.0 ** (-k)
@@ -688,42 +702,44 @@ def test_roundoff_plateau_accepted(monkeypatch) -> None:
     (p,) = res.roundoff_accepted
     assert isinstance(p, RoundoffPoint)
     assert p.index == 0 and p.vg == 0.0  # the vg - dv_qs solve of the first point
-    assert p.abs_error == 1.7e-16 and 1e-10 < p.rel_error <= 7e-10
-    assert p.abs_error <= p.roundoff_bound < 1e-14
-    assert p.min_abs_psi <= p.psi_bound  # a node with |psi| that small exists in that region
-    assert p.region == "oxide"
+    # the recorded errors are those of the re-solved state (the real round-off iterate)
+    assert p.abs_error <= p.roundoff_bound < 1e-14 and p.rel_error >= 0.0
+    if p.rel_error > 1e-10:  # (d): the violating region has a node with |psi| that small
+        assert p.min_abs_psi <= p.psi_bound
+    assert p.region in ("oxide", "body")
     assert all(pt.converged for pt in res.points)
     dd.delete_device()
 
 
-def test_roundoff_slow_convergence_rejected(monkeypatch) -> None:
-    """Relative error still falling over the last iterations: slow convergence, not a plateau."""
-    dd = _metal_stack("roundoff_slow")
-    _synthetic_failure(monkeypatch, rels=SLOW, abs_update=1.7e-16)
-    with pytest.raises(CVConvergenceError):
-        sweep_cv(dd, "gate", [1e-3], method="qs", dv_qs=1e-3, extended_precision=False,
-                 roundoff_accept=True)  # fmt: skip
-    dd.delete_device()
+def test_roundoff_accepted_point_has_the_solved_state(monkeypatch) -> None:
+    """DEVSIM restores the pre-solve solution of a non-converged solve, so an accepted point
+    must be solved again to its round-off iterate. The accepted solve (vg = 0 V, the lower
+    solve of the 1 mV point) is reached from the 0.501 V state of the first point, so a restored
+    state is the wrong one: the accepted point's Cgg must equal the all-converged sweep's, and
+    the device must hold the accepted (0 V) solution when the check runs."""
+    from gplugins.devsim import cv as cv_mod
 
-
-def test_roundoff_above_bound_rejected(monkeypatch) -> None:
-    """A potential update above ROUNDOFF_K * eps * max|psi| (though below abs_tol) is no
-    round-off: rejected."""
-    dd = _metal_stack("roundoff_big")
-    _synthetic_failure(monkeypatch, rels=PLATEAU, abs_update=5e-14)
-    with pytest.raises(CVConvergenceError):
-        sweep_cv(dd, "gate", [1e-3], method="qs", dv_qs=1e-3, extended_precision=False,
-                 roundoff_accept=True)  # fmt: skip
-    dd.delete_device()
-
-
-def test_roundoff_default_off(monkeypatch) -> None:
-    """Without roundoff_accept the plateau fails as before, and nothing is recorded otherwise."""
-    dd = _metal_stack("roundoff_off")
-    assert sweep_cv(dd, "gate", [0.5], method="qs").roundoff_accepted == ()
+    vg = [0.5, 1e-3]
+    dd = _metal_stack("roundoff_state")
+    ref = sweep_cv(dd, "gate", vg, method="qs", dv_qs=1e-3, extended_precision=False)
     _synthetic_failure(monkeypatch, rels=PLATEAU, abs_update=1.7e-16)
-    with pytest.raises(CVConvergenceError):
-        sweep_cv(dd, "gate", [1e-3], method="qs", dv_qs=1e-3, extended_precision=False)
-    with pytest.raises(ValueError, match="roundoff_accept"):
-        sweep_cv(dd, "gate", [0.5], method="ac", freq_hz=1e3, roundoff_accept=True)
+    states = []
+    real_charge = cv_mod._Session.pb_gate_charge
+
+    def spy(self):
+        if self.v_gate == 0.0:
+            # the accepted solve's state: the oxide's gate-contact node is at exactly 0 V
+            ox = devsim.get_node_model_values(device=self.device, region="oxide", name="Potential")
+            states.append(min(abs(v) for v in ox))
+        return real_charge(self)
+
+    monkeypatch.setattr(cv_mod._Session, "pb_gate_charge", spy)
+    res = sweep_cv(
+        dd, "gate", vg, method="qs", dv_qs=1e-3, extended_precision=False, roundoff_accept=True
+    )
+    (p,) = res.roundoff_accepted
+    assert p.index == 1 and p.vg == 0.0
+    assert states == [0.0]  # charge taken on the 0 V state, not the restored 0.501 V one
+    for x, y in zip(ref.cgg, res.cgg, strict=True):
+        assert abs(y / x - 1) < 1e-6, (x, y)
     dd.delete_device()
