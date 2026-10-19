@@ -59,7 +59,8 @@ def get_meshwell_cross_section(
         layer_stack: gf.technology.LayerStack,
         wafer_layer: gf.typings.Layer | None = LAYER.WAFER,
         wafer_padding: float | None = 0.0,
-        name_by: Literal["layer", "material"] = "layer"
+        name_by: Literal["layer", "material"] = "layer",
+        point_tolerance: float | None = None,
 ) -> List[PolySurface]:
     """Convert LayerStack + Component cross-section to meshwell PolySurface objects.
 
@@ -70,6 +71,9 @@ def get_meshwell_cross_section(
         wafer_layer: Optional wafer layer for padding
         wafer_padding: Optional padding around wafer layer
         name_by: How to name the physical entities ("layer" or "material")
+        point_tolerance: the vertex grid (um) of the PolySurfaces, which snap every vertex
+            to it; None keeps meshwell's default (1e-3 um), which rounds layer thicknesses
+            to 1 nm (e.g. a 15.2 nm oxide to 15 nm).
 
     Returns:
         List of PolySurface objects representing the cross-section
@@ -138,12 +142,14 @@ def get_meshwell_cross_section(
         else:
             mesh_order = layer_level.mesh_order
 
+        tolerance = {} if point_tolerance is None else {"point_tolerance": point_tolerance}
         surface = PolySurface(
             polygons=cross_section_polygons,
             physical_name=physical_name,
             mesh_order=mesh_order,
             mesh_bool=True,
-            additive=False
+            additive=False,
+            **tolerance,
         )
 
         surfaces.append(surface)

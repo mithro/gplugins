@@ -610,3 +610,81 @@ def test_gmsh_threads_one(tmp_path, monkeypatch) -> None:
     if len(os.sched_getaffinity(0)) > 1:
         # a meaningful check: there, meshwell's default would have been more than one thread
         assert out["cpu_count"] > 1
+
+
+# --------------------------------------------------------------------------------------------
+# point_tolerance: meshwell's vertex grid, which must not quantise thin layers
+# --------------------------------------------------------------------------------------------
+def _thin_layer_inputs(tox_um: float) -> dict:
+    """A 1 um wide silicon / oxide (``tox_um``) / silicon stack on three marker layers."""
+    import gdsfactory as gf
+    from gdsfactory.technology import LayerLevel, LayerStack, LogicalLayer
+
+    c = gf.Component()
+    levels = {}
+    for i, (name, material, zmin, t) in enumerate(
+        (
+            ("body", "si", -0.5, 0.5),
+            ("oxide", "sio2", 0.0, tox_um),
+            ("gate_poly", "si", tox_um, 0.2),
+        )
+    ):
+        layer = (1001 + i, 0)
+        c.add_polygon([(0, -1), (1, -1), (1, 1), (0, 1)], layer=layer)
+        levels[name] = LayerLevel(
+            layer=LogicalLayer(layer=layer), thickness=t, zmin=zmin, material=material, mesh_order=1
+        )
+    return {"component": c, "line": ((0, 0), (1, 0)), "stack": LayerStack(layers=levels)}
+
+
+def _oxide_z(entities) -> tuple[float, float]:
+    (ox,) = [e for e in entities if e.physical_name == ("oxide",)]
+    polys = ox.polygons if isinstance(ox.polygons, list) else [ox.polygons]
+    zs = [z for p in polys for _, z in p.exterior.coords]
+    return min(zs), max(zs)
+
+
+def test_xsection_point_tolerance() -> None:
+    """meshwell snaps every vertex to ``point_tolerance`` (default 1e-3 um), so a 15.2 nm oxide
+    would be meshed 15 nm thick, 1.3 % too thin (a 1.3 % too large oxide capacitance). A finer
+    ``point_tolerance`` keeps it."""
+    from gplugins.devsim.get_simulation import xsection_entities
+
+    kw = _thin_layer_inputs(0.0152)
+    default = xsection_entities(kw["component"], kw["line"], kw["stack"])
+    assert _oxide_z(default) == (0.0, 0.015)  # meshwell's 1 nm grid
+    fine = xsection_entities(kw["component"], kw["line"], kw["stack"], point_tolerance=1e-6)
+    lo, hi = _oxide_z(fine)
+    assert lo == 0.0 and abs(hi - 0.0152) < 1e-12
+
+
+def test_create_2duz_point_tolerance(tmp_path, monkeypatch) -> None:
+    """``create_2Duz_simulation(point_tolerance=...)`` reaches the mesh: the meshed oxide is
+    15.2 nm thick, not 15 nm."""
+    from gplugins.devsim.get_simulation import create_2Duz_simulation
+
+    monkeypatch.chdir(tmp_path)
+    kw = _thin_layer_inputs(0.0152)
+    for tol, want in ((None, 0.015), (1e-6, 0.0152)):
+        name = f"tol_{'default' if tol is None else 'fine'}"
+        create_2Duz_simulation(
+            component=kw["component"],
+            xsection_bounds=kw["line"],
+            full_layer_stack=kw["stack"],
+            physical_layer_stack=kw["stack"],
+            doping_info={},
+            contacts=[],
+            resolutions={},
+            default_resolution_min=0.002,
+            default_resolution_max=0.05,
+            temp_file_name=f"{name}.msh",
+            devsim_mesh_name=name,
+            devsim_device_name=name,
+            devsim_simulation_filename=None,
+            point_tolerance=tol,
+        )
+        ys = devsim.get_node_model_values(device=name, region="oxide", name="y")
+        assert min(ys) == 0.0
+        assert abs(max(ys) - want * 1e-4) < 1e-14, (tol, max(ys))
+        devsim.delete_device(device=name)
+        devsim.delete_mesh(mesh=name)

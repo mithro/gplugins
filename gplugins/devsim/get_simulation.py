@@ -58,6 +58,7 @@ def create_2Duz_simulation(
     global_meshsize_array: np.array | None = None,
     global_meshsize_interpolant_func: callable | None = NearestNDInterpolator,
     contacts: Sequence[Contact] | None = None,
+    point_tolerance: float | None = None,
 ):
     """Mesh the u-z cross-section of ``component`` along ``xsection_bounds`` into DEVSIM.
 
@@ -84,6 +85,10 @@ def create_2Duz_simulation(
             bounding box of the stack, padded by ``background_padding`` (u-left, z-down,
             u-right, z-up, um).
         global_meshsize_array: ``[x, y, z, size]`` rows (um) that replace ``resolutions``.
+        point_tolerance: meshwell's vertex grid (um) for the cross-section and its CAD
+            stage. None keeps meshwell's default, 1e-3 um, which snaps every vertex to a
+            1 nm grid: a 15.2 nm gate oxide is then meshed 15 nm thick. Pass a finer one
+            (e.g. 1e-6 um) when layer thicknesses are not whole nanometres.
 
     Naming: DEVSIM regions are the layer names of ``physical_layer_stack`` plus one region
     per contact (named after the contact). gmsh physical groups between two regions are
@@ -115,6 +120,7 @@ def create_2Duz_simulation(
         simulation_layertack,
         background_tag=background_tag,
         background_padding=background_padding,
+        point_tolerance=point_tolerance,
     )
     if global_meshsize_array is not None:
         # As in gplugins <= 0.8: a global size map replaces the resolutions.
@@ -132,6 +138,7 @@ def create_2Duz_simulation(
         global_scaling=mesh_scaling_factor,
         global_meshsize_array=global_meshsize_array,
         global_meshsize_interpolant_func=global_meshsize_interpolant_func,
+        point_tolerance=point_tolerance,
     )
 
     # The gmsh physical group names. meshio has no cell sets for MSH 2.2 (which DEVSIM reads),
@@ -366,6 +373,7 @@ def xsection_entities(
     layer_stack: LayerStack,
     background_tag: str | None = None,
     background_padding: tuple[float, float, float, float] = (2.0, 2.0, 2.0, 2.0),
+    point_tolerance: float | None = None,
 ) -> list[PolySurface]:
     """The meshwell surfaces of the u-z cross-section of ``layer_stack`` along the line.
 
@@ -373,7 +381,8 @@ def xsection_entities(
     on the line is one surface named after the layer. Overlaps go to the lowest
     ``mesh_order`` and ties to the first layer name in alphabetical order, the order of
     gplugins <= 0.8 (``order_layer_stack`` in ``uz_xsection_mesh``); meshwell itself breaks
-    ties by list order, so the list is sorted that way.
+    ties by list order, so the list is sorted that way. ``point_tolerance`` is the surfaces'
+    vertex grid (um; None: meshwell's 1e-3 um default, which rounds z to 1 nm).
     """
     surfaces = get_meshwell_cross_section(
         component=component,
@@ -382,16 +391,21 @@ def xsection_entities(
         wafer_layer=None,
         wafer_padding=None,
         name_by="layer",
+        point_tolerance=point_tolerance,
     )
     surfaces.sort(key=lambda s: (s.mesh_order, s.physical_name))
     if background_tag:
         surfaces.append(
-            _background_surface(layer_stack, xsection_bounds, background_tag, background_padding)
+            _background_surface(
+                layer_stack, xsection_bounds, background_tag, background_padding, point_tolerance
+            )
         )
     return surfaces
 
 
-def _background_surface(layer_stack, xsection_bounds, tag, padding) -> PolySurface:
+def _background_surface(
+    layer_stack, xsection_bounds, tag, padding, point_tolerance=None
+) -> PolySurface:
     """A ``tag`` rectangle around the stack's z-range and the cross-section line, padded.
 
     As gplugins <= 0.8 ``uz_xsection_mesh``: it has the highest mesh_order, so it only fills
@@ -411,7 +425,8 @@ def _background_surface(layer_stack, xsection_bounds, tag, padding) -> PolySurfa
         ]
     )
     order = max(lv.mesh_order for lv in levels) + 1
-    return PolySurface(polygons=box, physical_name=tag, mesh_order=order)
+    tolerance = {} if point_tolerance is None else {"point_tolerance": point_tolerance}
+    return PolySurface(polygons=box, physical_name=tag, mesh_order=order, **tolerance)
 
 
 if __name__ == "__main__":
