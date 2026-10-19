@@ -72,6 +72,25 @@ is retried, from where it stopped, in extended precision at the same tolerances,
 returns to double; the grid points that needed it are listed in ``CVResult.extended_fallback``.
 Nothing is relaxed: a point that fails in extended precision too still fails.
 
+Round-off near psi = 0. DEVSIM's relative error of an equation is the largest
+|update| / (|value| + 1e-10) over its nodes (``Equation.cc``, ``minError`` 1e-10), so where a
+potential passes through 0 V in a charge-free dielectric the 1e-10 relative criterion asks for
+an update below about 1e-20 V, beyond the linear solve's round-off (about 1e-16 V, in double and
+in extended precision alike: on the gf180-tcad 2D MOS capacitor the update stalls at
+1.6-1.7e-16 V while the relative error wanders between 1e-10 and 7e-10 for 45 iterations).
+``roundoff_accept=True`` (QS only, opt-in) accepts such a non-converged solve, and records it
+(``CVResult.roundoff_accepted``), only if, on its final iterations:
+
+(a) every ``PotentialEquation`` absolute update is <= ``abs_tol`` (unchanged);
+(b) the largest potential update of each of the last :data:`ROUNDOFF_WINDOW` iterations is
+    <= :data:`ROUNDOFF_K` * eps * max|psi| (eps the double machine epsilon, max|psi| over the
+    device): round-off of the potentials, not an unconverged update;
+(c) the relative error has stagnated: no new minimum in the last :data:`ROUNDOFF_WINDOW`
+    iterations (a plateau, not slow convergence);
+(d) in every region whose relative error exceeds ``rel_tol`` a node has
+    |psi| <= (its largest update) / ``rel_tol``, which is where the definition puts a violating
+    node; that region and its smallest |psi| are recorded.
+
 Progress. A long sweep (a fine 2D mesh takes hours) can report each bias point through
 ``progress(stage, index, vg)``, called after the point is done (converged or not), in sweep
 order: stage ``"qs"`` for every point of a QS sweep; ``"pb"`` (its Poisson-Boltzmann point)
@@ -82,6 +101,7 @@ from __future__ import annotations
 
 import math
 import re
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -93,7 +113,7 @@ from devsim.python_packages import model_create
 from gplugins.devsim import contacts as contacts_mod
 from gplugins.devsim.convergence import ConvergenceError, solve_dc
 
-__all__ = ["CVConvergenceError", "CVResult", "PointInfo", "sweep_cv"]
+__all__ = ["CVConvergenceError", "CVResult", "PointInfo", "RoundoffPoint", "sweep_cv"]
 
 #: DEVSIM's absolute error for every solve: not binding (the potential update is checked
 #: against ``abs_tol`` per equation afterwards; a carrier's update is in cm^-3).
@@ -102,6 +122,15 @@ SOLVER_ABSOLUTE_ERROR = 1e30
 MAX_STEP_V = 0.1
 MAX_HALVINGS = 4
 
+#: roundoff_accept: the k of the round-off bound k * eps * max|psi|. At the 2D point that
+#: motivated it, max|psi| is about 0.6 V (n+ source/drain +0.60 V, p body -0.43 V), so the bound
+#: is 32 * 2.22e-16 * 0.6 V = 4.3e-15 V: 25 times the observed floor (1.7e-16 V) and 230 times
+#: below the default abs_tol (1e-12 V). At max|psi| = 6 V it is 4.3e-14 V, still 23 times below.
+ROUNDOFF_K = 32
+#: roundoff_accept: the iterations over which the update must be at round-off and the relative
+#: error must make no new minimum.
+ROUNDOFF_WINDOW = 10
+_EPS = sys.float_info.epsilon
 _QFL = "cv_qfl"  # silicon region parameter: the region's flat quasi-Fermi level (V)
 _N, _P, _CHARGE = "cv_qs_electrons", "cv_qs_holes", "cv_qs_charge"
 _CONTINUITY = ("ElectronContinuityEquation", "HoleContinuityEquation")
@@ -125,13 +154,37 @@ class PointInfo:
 
 
 @dataclass(frozen=True)
+class RoundoffPoint:
+    """A QS solve accepted by ``roundoff_accept`` (see the module notes).
+
+    ``index`` is the grid point and ``vg`` the gate bias solved (``vg[index] -+ dv_qs``);
+    ``rel_error``/``abs_error`` the last iteration's largest relative error and potential
+    update; ``max_abs_psi`` the device's max|psi| and ``roundoff_bound`` = ROUNDOFF_K * eps *
+    max_abs_psi; ``region`` the region with the largest relative error, ``psi_bound`` the |psi|
+    below which a node there must lie to violate rel_tol and ``min_abs_psi`` the smallest |psi|
+    of that region.
+    """
+
+    index: int
+    vg: float
+    rel_error: float
+    abs_error: float
+    max_abs_psi: float
+    roundoff_bound: float
+    region: str
+    psi_bound: float
+    min_abs_psi: float
+
+
+@dataclass(frozen=True)
 class CVResult:
     """A C-V sweep. ``cgg[i]`` is the gate capacitance at ``vg[i]`` in ``unit``.
 
     ``cgx`` (``"ac"`` only, else empty) maps every non-gate contact x to Cxg = -dQ_x/dVg, so
     that ``cgg[i] == sum(cgx[x][i] for x in cgx)`` (charge conservation).
     ``extended_fallback`` lists the indices of the points that ``precision_fallback`` solved
-    (in part) in extended precision.
+    (in part) in extended precision; ``roundoff_accepted`` the solves that ``roundoff_accept``
+    accepted (:class:`RoundoffPoint`).
     """
 
     vg: tuple[float, ...]
@@ -143,6 +196,7 @@ class CVResult:
     freq_hz: float | None
     dv_qs: float | None
     extended_fallback: tuple[int, ...] = ()
+    roundoff_accepted: tuple[RoundoffPoint, ...] = ()
 
 
 class CVConvergenceError(ConvergenceError):
@@ -218,6 +272,64 @@ def _solve(device: str, *, rel_tol: float, abs_tol: float, max_iterations: int) 
             )
 
 
+def _roundoff_check(device: str, info: dict | None, *, rel_tol: float, abs_tol: float):
+    """``(rel, abs, details)`` if a non-converged solve meets conditions (a)-(d) of
+    ``roundoff_accept`` (module notes), else None."""
+    iterations = (info or {}).get("iterations") or ()
+    if len(iterations) <= ROUNDOFF_WINDOW:
+        return None
+    rels, pots, regions_last = [], [], {}
+    for it in iterations:
+        devs = [d for d in it["devices"] if d["name"] == device]
+        if not devs:
+            return None
+        rel, pot = 0.0, 0.0
+        for region in devs[0]["regions"]:
+            for eq in region["equations"]:
+                rel = max(rel, eq["relative_error"])
+                if eq["name"] == "PotentialEquation":
+                    pot = max(pot, eq["absolute_error"])
+                elif eq["relative_error"] > rel_tol:
+                    return None  # only potential round-off is accepted (QS has no carriers)
+        rels.append(rel)
+        pots.append(pot)
+    for region in [d for d in iterations[-1]["devices"] if d["name"] == device][0]["regions"]:
+        for eq in region["equations"]:
+            if eq["name"] == "PotentialEquation":
+                regions_last[region["name"]] = (eq["relative_error"], eq["absolute_error"])
+    # (a) every potential update within abs_tol
+    if any(a > abs_tol for _, a in regions_last.values()):
+        return None
+    psi = {
+        r: [abs(v) for v in devsim.get_node_model_values(device=device, region=r, name="Potential")]
+        for r in regions_last
+    }
+    max_psi = max(max(v) for v in psi.values())
+    bound = ROUNDOFF_K * _EPS * max_psi
+    # (b) round-off updates over the whole window
+    if any(p > bound for p in pots[-ROUNDOFF_WINDOW:]):
+        return None
+    # (c) a plateau: no new minimum of the relative error in the window
+    if min(rels[-ROUNDOFF_WINDOW:]) < min(rels[:-ROUNDOFF_WINDOW]):
+        return None
+    # (d) every violating region has a node with |psi| small enough to violate rel_tol
+    violating = {r: ra for r, ra in regions_last.items() if ra[0] > rel_tol}
+    if not violating:
+        return None
+    for r, (_, a) in violating.items():
+        if min(psi[r]) > a / rel_tol:
+            return None
+    worst = max(violating, key=lambda r: violating[r][0])
+    details = {
+        "max_abs_psi": max_psi,
+        "roundoff_bound": bound,
+        "region": worst,
+        "psi_bound": violating[worst][1] / rel_tol,
+        "min_abs_psi": min(psi[worst]),
+    }
+    return rels[-1], pots[-1], details
+
+
 def _merge(a: PointInfo, b: PointInfo) -> PointInfo:
     return PointInfo(
         a.converged and b.converged,
@@ -244,10 +356,14 @@ class _Session:
         abs_tol: float,
         max_iterations: int,
         precision_fallback: bool = False,
+        roundoff_accept: bool = False,
     ):
         self.dd = dd
         self.fallback = precision_fallback
         self.fallback_used = False
+        self.roundoff = roundoff_accept
+        self.roundoff_hits: list[RoundoffPoint] = []
+        self.index = -1
         self.device = device = dd.device
         self.gate = gate
         self.tol = {"rel_tol": rel_tol, "abs_tol": abs_tol, "max_iterations": max_iterations}
@@ -390,7 +506,17 @@ class _Session:
     def solve(self) -> PointInfo:
         try:
             return _solve(self.device, **self.tol)
-        except ConvergenceError:
+        except ConvergenceError as e:
+            if self.roundoff:
+                ok = _roundoff_check(
+                    self.device, e.info, rel_tol=self.tol["rel_tol"], abs_tol=self.tol["abs_tol"]
+                )
+                if ok is not None:
+                    rel, pot, details = ok
+                    self.roundoff_hits.append(
+                        RoundoffPoint(self.index, self.v_gate, rel, pot, **details)
+                    )
+                    return PointInfo(True, len(e.info["iterations"]), rel, pot)
             if not self.fallback:
                 raise
         # retry from where the double-precision Newton stopped, in extended precision
@@ -613,6 +739,7 @@ def sweep_cv(
     extended_precision: bool = True,
     progress: Callable[[str, int, float], None] | None = None,
     precision_fallback: bool = False,
+    roundoff_accept: bool = False,
 ) -> CVResult:
     """Cgg (and, for ``"ac"``, Cxg of every non-gate contact) of ``device`` over ``vg``.
 
@@ -638,6 +765,9 @@ def sweep_cv(
         precision_fallback: ``"qs"`` with ``extended_precision=False`` only: retry a solve
             that fails in double precision in extended precision, at the same tolerances
             (see the module notes); ``CVResult.extended_fallback`` lists those points.
+        roundoff_accept: ``"qs"`` only: accept a solve whose relative error plateaus at
+            round-off near psi = 0 under conditions (a)-(d) of the module notes;
+            ``CVResult.roundoff_accepted`` records each one.
 
     Returns:
         A :class:`CVResult`; ``unit`` is F/cm^2 (1D) or F/cm (2D).
@@ -669,6 +799,8 @@ def sweep_cv(
             "precision_fallback applies to a QS sweep in double precision "
             "(method='qs', extended_precision=False)"
         )
+    if roundoff_accept and method != "qs":
+        raise ValueError("roundoff_accept applies to a QS sweep (method='qs')")
     if method == "ac" and not extended_precision:
         raise ValueError(
             "method 'ac' needs extended precision: the small-signal AC solve loses accuracy in "
@@ -682,6 +814,7 @@ def sweep_cv(
         abs_tol=abs_tol,
         max_iterations=max_iterations,
         precision_fallback=precision_fallback,
+        roundoff_accept=roundoff_accept,
     )
     fallback_points: list[int] = []
     if method == "ac":
@@ -697,6 +830,7 @@ def sweep_cv(
         pb_states: dict[int, dict] = {}
         for i, v in enumerate(vg):
             session.fallback_used = False
+            session.index = i
             try:
                 if method == "qs":
                     lo = session.pb_to(v - dv_qs)
@@ -752,4 +886,5 @@ def sweep_cv(
         freq_hz=freq_hz,
         dv_qs=dv_qs if method == "qs" else None,
         extended_fallback=tuple(fallback_points),
+        roundoff_accepted=tuple(session.roundoff_hits),
     )
