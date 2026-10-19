@@ -45,6 +45,8 @@ PN_VOLTAGES = (0.1, 0.2)
 CURRENT_NOISE_FLOOR = 1e-26
 #: The generic stack's interface that v0.8.0's mesher never tagged (see the currents test).
 RIB_SLAB_INTERFACE = "core___slab90"
+#: The floating rib's corner-jump invariant holds to this, V (measured: 1e-15 V).
+RIB_JUMP_TOL_V = 1e-3
 
 # simple_physics (DEVSIM) constants that DDComponent.set_parameters uses at 300 K.
 _VT = 1.3806503e-23 * 300 / 1.6e-19
@@ -251,9 +253,9 @@ def _junction(c) -> dict:
     ``x_um`` is the metallurgical junction (midway between the last NetDoping > 0 and first
     < 0 node). ``n_v``/``p_v`` are the Potential at the nodes nearest ``x_um`` -/+
     JUNCTION_OFFSET_UM (the neutral n and p sides, inside the rib), ``drop_v = n_v - p_v`` the
-    junction's potential drop, and ``boundary_jump_v`` the largest Potential difference
-    between the ``core`` and ``slab90`` nodes at the rib's two bottom corners (0 if the two
-    regions are coupled).
+    junction's potential drop, ``corner_jumps_v`` the signed Potential differences ``core`` -
+    ``slab90`` at the rib's two bottom corners (left, right), and ``boundary_jump_v`` the larger
+    of their magnitudes (0 if the two regions are coupled).
     """
     row = _bottom_row(c, c.regions["si"])
     xj = 0.5 * (
@@ -266,7 +268,8 @@ def _junction(c) -> dict:
     core = _bottom_row(c, ["core"])
     slab = _bottom_row(c, ["slab90"])
     corners = (core[0][0], core[-1][0])
-    jump = max(abs(at(x0, core) - at(x0, slab)) for x0 in corners)
+    corner_jumps = [at(x0, core) - at(x0, slab) for x0 in corners]
+    jump = max(abs(d) for d in corner_jumps)
     n_v, p_v = at(xj - JUNCTION_OFFSET_UM), at(xj + JUNCTION_OFFSET_UM)
     return {
         "x_um": xj,
@@ -275,6 +278,7 @@ def _junction(c) -> dict:
         "p_v": p_v,
         "drop_v": n_v - p_v,
         "boundary_jump_v": jump,
+        "corner_jumps_v": corner_jumps,
     }
 
 
@@ -485,8 +489,13 @@ def test_pn_slab_currents_explained(pn_slab, record_property) -> None:
 
     - **v0.8.0 topology** (the same mesh with ``core___slab90`` left out of DEVSIM): the
       currents stay below the 1e-26 A/cm noise floor, the junction drop is 0.83450 V at every
-      step, and the regions disagree at the rib's corners (non-zero corner jump): v0.8.0's
-      signatures, reproduced. The floating rib's absolute Potential differs from v0.8.0's
+      step, and the regions disagree at the rib's corners: at mesh x1 and x0.5 the signed
+      core - slab jump at the right corner follows each 0.1 V bias step exactly (to 1e-3 V;
+      measured to 1e-15 V) and the left corner's does not move, because the floating rib does
+      not follow the slab. v0.8.0's signatures, reproduced. The size of the jump is not
+      checked: it is the rib's arbitrary offset (0.118 V at x1 and -0.558 V at x0.5 with gmsh
+      4.15.2, 0.035 V and -1.084 V with gmsh 5.0.0.dev20261018, at equilibrium). The floating
+      rib's absolute Potential differs from v0.8.0's
       (and between meshes) because nothing fixes it: with no contact or interface, the rib's
       offset is set only by the solver's initial guess and the mesh, so only differences
       inside the rib (the drop) are comparable.
@@ -499,19 +508,42 @@ def test_pn_slab_currents_explained(pn_slab, record_property) -> None:
     """
     vbi = _VT * math.log(1e17 * 1e17 / _NI**2)  # 0.834503 V
 
-    old = pn_slab(1.0, v080_topology=True)
-    assert sorted(old["interfaces"]) == V080_INTERFACES
-    old_states = [old["equilibrium"], *old["bias"]]
-    for s in old_states:
-        j = s["junction"]
-        record_property(f"v080_topology_junction_v{s['dv']:.4f}", j)
-        assert all(abs(i) < CURRENT_NOISE_FLOOR for i in s["currents"].values()), s[
-            "currents"
-        ]
-        assert abs(j["drop_v"] - vbi) < 1e-4, j
-        assert abs(j["drop_v"] - old_states[0]["junction"]["drop_v"]) < 1e-9, j
-        assert abs(j["junction_v"] - old_states[0]["junction"]["junction_v"]) < 1e-9, j
-        assert j["boundary_jump_v"] > 0.05, j  # the rib floats
+    # The rib floats: between bias steps only the slab moves, so the signed core - slab jump
+    # changes by exactly the step of the contact potential difference dv (anode - cathode) at
+    # the rib's right corner (measured: the one whose slab follows the ramped cathode) and not
+    # at all at the left one. That holds on every mesh, unlike the size of the jump, which only
+    # the mesh and the initial guess set (see the docstring); so it is checked at mesh x1 and
+    # x0.5. The right corner's jump changes by 0.1 V, so it is non-zero at one bias or the next.
+    for mesh_scale in (1.0, 0.5):
+        old = pn_slab(mesh_scale, v080_topology=True)
+        assert sorted(old["interfaces"]) == V080_INTERFACES
+        old_states = [old["equilibrium"], *old["bias"]]
+        for s in old_states:
+            j = s["junction"]
+            record_property(f"v080_topology_x{mesh_scale}_junction_v{s['dv']:.4f}", j)
+            assert all(
+                abs(i) < CURRENT_NOISE_FLOOR for i in s["currents"].values()
+            ), s["currents"]
+            assert abs(j["drop_v"] - vbi) < 1e-4, j
+            assert abs(j["drop_v"] - old_states[0]["junction"]["drop_v"]) < 1e-9, j
+            assert (
+                abs(j["junction_v"] - old_states[0]["junction"]["junction_v"]) < 1e-9
+            ), j
+        for prev, s in zip(old_states, old_states[1:]):
+            step = s["dv"] - prev["dv"]  # -0.1 V: the cathode is ramped by +0.1 V
+            left, right = (
+                b - a
+                for a, b in zip(
+                    prev["junction"]["corner_jumps_v"], s["junction"]["corner_jumps_v"]
+                )
+            )
+            record_property(
+                f"v080_topology_x{mesh_scale}_corner_jump_steps_dv{s['dv']:.4f}",
+                (left, right),
+            )
+            assert abs(step + 0.1) < 1e-9, step
+            assert abs(left) < RIB_JUMP_TOL_V, (mesh_scale, left, right, step)
+            assert abs(right - step) < RIB_JUMP_TOL_V, (mesh_scale, left, right, step)
 
     new = pn_slab(1.0)
     states = [new["equilibrium"], *new["bias"]]
