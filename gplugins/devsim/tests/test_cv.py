@@ -632,3 +632,98 @@ def test_fallback_only_for_qs_in_double() -> None:
     with pytest.raises(ValueError, match="precision_fallback"):
         sweep_cv(dd, "gate", [0.0], method="qs", precision_fallback=True)  # already extended
     dd.delete_device()
+
+
+# --------------------------------------------------------------------------------------------
+# roundoff_accept: a QS solve whose relative error plateaus at round-off near psi = 0
+# --------------------------------------------------------------------------------------------
+def _synthetic_failure(monkeypatch, *, rels, abs_update, at_bias=0.0):
+    """Make the DC solve at gate bias ``at_bias`` report non-convergence with a synthetic
+    iteration history (device ``rels`` per iteration, the oxide's potential update
+    ``abs_update`` V on the last iterations), after a real solve that leaves the converged state.
+    Every other solve is real."""
+    from gplugins.devsim import cv as cv_mod
+
+    real = cv_mod.solve_dc
+
+    def fake(**kw):
+        info = real(**kw)
+        dev = devsim.get_device_list()[0]
+        if devsim.get_parameter(device=dev, name="gate_bias") != at_bias:
+            return info
+        iterations = []
+        for k, r in enumerate(rels):
+            a = abs_update if k >= 4 else 1e-3 * 10.0 ** (-k)
+            eqs = lambda rr, aa: [{"name": "PotentialEquation", "relative_error": rr,
+                                   "absolute_error": aa}]  # noqa: E731
+            iterations.append({"devices": [{"name": dev, "relative_error": r, "absolute_error": a,
+                "regions": [{"name": "oxide", "relative_error": r, "absolute_error": a,
+                             "equations": eqs(r, a)},
+                            {"name": "body", "relative_error": 1e-12, "absolute_error": 1e-17,
+                             "equations": eqs(1e-12, 1e-17)}]}]})  # fmt: skip
+        raise cv_mod.ConvergenceError("synthetic non-convergence", {"converged": False,
+                                      "iterations": iterations})  # fmt: skip
+
+    monkeypatch.setattr(cv_mod, "solve_dc", fake)
+
+
+# a plateau: down to 1.3e-10 by iteration 4, then wandering 1e-10 .. 7e-10 for 45 iterations
+PLATEAU = [1e2, 1e-2, 1e-5, 1e-8, 1.3e-10] + [4e-10, 7e-10, 6e-10, 2e-10, 5e-10] * 9
+# slow but converging: still falling at every iteration (would converge with more iterations)
+SLOW = [10.0 ** (-k / 5) for k in range(50)]
+
+
+def test_roundoff_plateau_accepted(monkeypatch) -> None:
+    """A QS solve whose relative error plateaus above rel_tol while the potential update is at
+    round-off (1.7e-16 V), in a region with a node at psi = 0, is accepted and recorded."""
+    from gplugins.devsim.cv import ROUNDOFF_K, ROUNDOFF_WINDOW, RoundoffPoint
+
+    assert ROUNDOFF_K == 32 and ROUNDOFF_WINDOW == 10
+    dd = _metal_stack("roundoff_ok")
+    _synthetic_failure(monkeypatch, rels=PLATEAU, abs_update=1.7e-16)
+    res = sweep_cv(
+        dd, "gate", [1e-3, 0.5], method="qs", dv_qs=1e-3, extended_precision=False,
+        roundoff_accept=True,
+    )  # fmt: skip
+    (p,) = res.roundoff_accepted
+    assert isinstance(p, RoundoffPoint)
+    assert p.index == 0 and p.vg == 0.0  # the vg - dv_qs solve of the first point
+    assert p.abs_error == 1.7e-16 and 1e-10 < p.rel_error <= 7e-10
+    assert p.abs_error <= p.roundoff_bound < 1e-14
+    assert p.min_abs_psi <= p.psi_bound  # a node with |psi| that small exists in that region
+    assert p.region == "oxide"
+    assert all(pt.converged for pt in res.points)
+    dd.delete_device()
+
+
+def test_roundoff_slow_convergence_rejected(monkeypatch) -> None:
+    """Relative error still falling over the last iterations: slow convergence, not a plateau."""
+    dd = _metal_stack("roundoff_slow")
+    _synthetic_failure(monkeypatch, rels=SLOW, abs_update=1.7e-16)
+    with pytest.raises(CVConvergenceError):
+        sweep_cv(dd, "gate", [1e-3], method="qs", dv_qs=1e-3, extended_precision=False,
+                 roundoff_accept=True)  # fmt: skip
+    dd.delete_device()
+
+
+def test_roundoff_above_bound_rejected(monkeypatch) -> None:
+    """A potential update above ROUNDOFF_K * eps * max|psi| (though below abs_tol) is no
+    round-off: rejected."""
+    dd = _metal_stack("roundoff_big")
+    _synthetic_failure(monkeypatch, rels=PLATEAU, abs_update=5e-14)
+    with pytest.raises(CVConvergenceError):
+        sweep_cv(dd, "gate", [1e-3], method="qs", dv_qs=1e-3, extended_precision=False,
+                 roundoff_accept=True)  # fmt: skip
+    dd.delete_device()
+
+
+def test_roundoff_default_off(monkeypatch) -> None:
+    """Without roundoff_accept the plateau fails as before, and nothing is recorded otherwise."""
+    dd = _metal_stack("roundoff_off")
+    assert sweep_cv(dd, "gate", [0.5], method="qs").roundoff_accepted == ()
+    _synthetic_failure(monkeypatch, rels=PLATEAU, abs_update=1.7e-16)
+    with pytest.raises(CVConvergenceError):
+        sweep_cv(dd, "gate", [1e-3], method="qs", dv_qs=1e-3, extended_precision=False)
+    with pytest.raises(ValueError, match="roundoff_accept"):
+        sweep_cv(dd, "gate", [0.5], method="ac", freq_hz=1e3, roundoff_accept=True)
+    dd.delete_device()
