@@ -91,6 +91,13 @@ in extended precision alike: on the gf180-tcad 2D MOS capacitor the update stall
     |psi| <= (its largest update) / ``rel_tol``, which is where the definition puts a violating
     node; that region and its smallest |psi| are recorded.
 
+DEVSIM restores the solution from before a non-converged solve (``math/Newton.cc``,
+``RestoreSolutions``). So (a)-(c) are checked on the failed solve's iteration history, and the
+point is then solved again from the restored state with DEVSIM's absolute error set to the
+round-off bound and its relative error non-binding: DEVSIM stops, converged, at the round-off
+iterate and keeps that state. The update bound and (d) are checked on that kept state, whose
+charge the sweep then uses.
+
 Progress. A long sweep (a fine 2D mesh takes hours) can report each bias point through
 ``progress(stage, index, vg)``, called after the point is done (converged or not), in sweep
 order: stage ``"qs"`` for every point of a QS sweep; ``"pb"`` (its Poisson-Boltzmann point)
@@ -131,6 +138,8 @@ ROUNDOFF_K = 32
 #: error must make no new minimum.
 ROUNDOFF_WINDOW = 10
 _EPS = sys.float_info.epsilon
+#: The relative error of the round-off re-solve: non-binding (its acceptance is checked after).
+_NON_BINDING_REL = 1e30
 _QFL = "cv_qfl"  # silicon region parameter: the region's flat quasi-Fermi level (V)
 _N, _P, _CHARGE = "cv_qs_electrons", "cv_qs_holes", "cv_qs_charge"
 _CONTINUITY = ("ElectronContinuityEquation", "HoleContinuityEquation")
@@ -272,62 +281,64 @@ def _solve(device: str, *, rel_tol: float, abs_tol: float, max_iterations: int) 
             )
 
 
-def _roundoff_check(device: str, info: dict | None, *, rel_tol: float, abs_tol: float):
-    """``(rel, abs, details)`` if a non-converged solve meets conditions (a)-(d) of
-    ``roundoff_accept`` (module notes), else None."""
+def _potential_errors(device: str, iteration: dict) -> dict[str, tuple[float, float]] | None:
+    """``{region: (rel, abs)}`` of the PotentialEquation of one iteration; None if any other
+    equation is above its relative tolerance (not the potential round-off case) or the device
+    is missing."""
+    devs = [d for d in iteration["devices"] if d["name"] == device]
+    if not devs:
+        return None
+    out = {}
+    for region in devs[0]["regions"]:
+        for eq in region["equations"]:
+            if eq["name"] == "PotentialEquation":
+                out[region["name"]] = (eq["relative_error"], eq["absolute_error"])
+    return out
+
+
+def _max_abs_psi(device: str, regions) -> dict[str, list[float]]:
+    return {
+        r: [abs(v) for v in devsim.get_node_model_values(device=device, region=r, name="Potential")]
+        for r in regions
+    }
+
+
+def _roundoff_history(device: str, info: dict | None, *, rel_tol: float, abs_tol: float):
+    """The round-off bound (V) if a failed solve's iteration history meets conditions (a)-(c)
+    of ``roundoff_accept`` (module notes), else None.
+
+    DEVSIM restores the pre-solve solution of a non-converged solve, so max|psi| here is that
+    of the restored state (the previous bias, a few mV away: the same scale); (d) is checked on
+    the re-solved state (:meth:`_Session._roundoff_resolve`).
+    """
     iterations = (info or {}).get("iterations") or ()
     if len(iterations) <= ROUNDOFF_WINDOW:
         return None
-    rels, pots, regions_last = [], [], {}
+    rels, pots = [], []
     for it in iterations:
-        devs = [d for d in it["devices"] if d["name"] == device]
-        if not devs:
+        errs = _potential_errors(device, it)
+        if not errs:
             return None
-        rel, pot = 0.0, 0.0
-        for region in devs[0]["regions"]:
+        devs = [d for d in it["devices"] if d["name"] == device][0]
+        for region in devs["regions"]:
             for eq in region["equations"]:
-                rel = max(rel, eq["relative_error"])
-                if eq["name"] == "PotentialEquation":
-                    pot = max(pot, eq["absolute_error"])
-                elif eq["relative_error"] > rel_tol:
+                if eq["name"] != "PotentialEquation" and eq["relative_error"] > rel_tol:
                     return None  # only potential round-off is accepted (QS has no carriers)
-        rels.append(rel)
-        pots.append(pot)
-    for region in [d for d in iterations[-1]["devices"] if d["name"] == device][0]["regions"]:
-        for eq in region["equations"]:
-            if eq["name"] == "PotentialEquation":
-                regions_last[region["name"]] = (eq["relative_error"], eq["absolute_error"])
+        rels.append(max(r for r, _ in errs.values()))
+        pots.append(max(a for _, a in errs.values()))
+    last = _potential_errors(device, iterations[-1])
     # (a) every potential update within abs_tol
-    if any(a > abs_tol for _, a in regions_last.values()):
+    if any(a > abs_tol for _, a in last.values()):
         return None
-    psi = {
-        r: [abs(v) for v in devsim.get_node_model_values(device=device, region=r, name="Potential")]
-        for r in regions_last
-    }
-    max_psi = max(max(v) for v in psi.values())
-    bound = ROUNDOFF_K * _EPS * max_psi
+    psi = _max_abs_psi(device, last)
+    bound = ROUNDOFF_K * _EPS * max(max(v) for v in psi.values())
     # (b) round-off updates over the whole window
     if any(p > bound for p in pots[-ROUNDOFF_WINDOW:]):
         return None
     # (c) a plateau: no new minimum of the relative error in the window
     if min(rels[-ROUNDOFF_WINDOW:]) < min(rels[:-ROUNDOFF_WINDOW]):
         return None
-    # (d) every violating region has a node with |psi| small enough to violate rel_tol
-    violating = {r: ra for r, ra in regions_last.items() if ra[0] > rel_tol}
-    if not violating:
-        return None
-    for r, (_, a) in violating.items():
-        if min(psi[r]) > a / rel_tol:
-            return None
-    worst = max(violating, key=lambda r: violating[r][0])
-    details = {
-        "max_abs_psi": max_psi,
-        "roundoff_bound": bound,
-        "region": worst,
-        "psi_bound": violating[worst][1] / rel_tol,
-        "min_abs_psi": min(psi[worst]),
-    }
-    return rels[-1], pots[-1], details
+    return bound, len(last)
 
 
 def _merge(a: PointInfo, b: PointInfo) -> PointInfo:
@@ -503,20 +514,65 @@ class _Session:
             devsim.set_parameter(device=self.device, region=r, name=_QFL, value=float(v))
         self.v_gate = float(v)
 
+    def _roundoff_resolve(self, bound: float, n_regions: int, *, failed_iterations: int):
+        """Solve again, from the restored state, to the round-off iterate, and accept it if the
+        kept state meets the update bound and condition (d); else None.
+
+        DEVSIM's absolute error is the sum over regions of each equation's largest update, so
+        ``absolute_error = bound * n_regions`` with a non-binding relative error makes DEVSIM
+        stop, converged, once the potential updates are at round-off, and keep that state
+        (a converged solve is not restored). The per-equation update and (d) are then checked
+        on that state; a solve that stops elsewhere is rejected.
+        """
+        rel_tol, abs_tol = self.tol["rel_tol"], self.tol["abs_tol"]
+        try:
+            info = solve_dc(
+                absolute_error=bound * n_regions,
+                relative_error=_NON_BINDING_REL,
+                maximum_iterations=self.tol["max_iterations"],
+            )
+        except ConvergenceError:
+            return None
+        last = _potential_errors(self.device, info["iterations"][-1])
+        if not last or any(a > min(abs_tol, bound) for _, a in last.values()):
+            return None
+        psi = _max_abs_psi(self.device, last)
+        # (d) every region above rel_tol has a node with |psi| small enough for the relative
+        # error (|update| / (|psi| + 1e-10 V)) to exceed rel_tol at round-off updates
+        violating = {r: ra for r, ra in last.items() if ra[0] > rel_tol}
+        for r, (_, a) in violating.items():
+            if min(psi[r]) > a / rel_tol:
+                return None
+        rel = max(r for r, _ in last.values())
+        pot = max(a for _, a in last.values())
+        worst = max(last, key=lambda r: last[r][0])
+        self.roundoff_hits.append(
+            RoundoffPoint(
+                index=self.index,
+                vg=self.v_gate,
+                rel_error=rel,
+                abs_error=pot,
+                max_abs_psi=max(max(v) for v in psi.values()),
+                roundoff_bound=bound,
+                region=worst,
+                psi_bound=last[worst][1] / rel_tol,
+                min_abs_psi=min(psi[worst]),
+            )
+        )
+        return PointInfo(True, failed_iterations + len(info["iterations"]), rel, pot)
+
     def solve(self) -> PointInfo:
         try:
             return _solve(self.device, **self.tol)
         except ConvergenceError as e:
             if self.roundoff:
-                ok = _roundoff_check(
+                pre = _roundoff_history(
                     self.device, e.info, rel_tol=self.tol["rel_tol"], abs_tol=self.tol["abs_tol"]
                 )
-                if ok is not None:
-                    rel, pot, details = ok
-                    self.roundoff_hits.append(
-                        RoundoffPoint(self.index, self.v_gate, rel, pot, **details)
-                    )
-                    return PointInfo(True, len(e.info["iterations"]), rel, pot)
+                if pre is not None:
+                    point = self._roundoff_resolve(*pre, failed_iterations=len(e.info["iterations"]))
+                    if point is not None:
+                        return point
             if not self.fallback:
                 raise
         # retry from where the double-precision Newton stopped, in extended precision
