@@ -64,6 +64,14 @@ checked). The AC solve needs extended precision: in double precision the 1 kHz A
 1D nfet stack near the onset of inversion moves by 1.1e-3 relative although every DC point
 converges to rel_tol 1e-10, so ``"ac"`` refuses ``extended_precision=False``.
 
+In double precision the relative criterion can also stall where a potential is near 0 V: on a
+2D MOS capacitor with a charge-free dielectric next to the gate, one QS point of 201 stopped at
+a relative update of 7e-10 (absolute 1.7e-16 V, round-off) and could not reach 1e-10. With
+``precision_fallback=True`` (QS in double precision only) a solve that fails in double precision
+is retried, from where it stopped, in extended precision at the same tolerances, then the sweep
+returns to double; the grid points that needed it are listed in ``CVResult.extended_fallback``.
+Nothing is relaxed: a point that fails in extended precision too still fails.
+
 Progress. A long sweep (a fine 2D mesh takes hours) can report each bias point through
 ``progress(stage, index, vg)``, called after the point is done (converged or not), in sweep
 order: stage ``"qs"`` for every point of a QS sweep; ``"pb"`` (its Poisson-Boltzmann point)
@@ -122,6 +130,8 @@ class CVResult:
 
     ``cgx`` (``"ac"`` only, else empty) maps every non-gate contact x to Cxg = -dQ_x/dVg, so
     that ``cgg[i] == sum(cgx[x][i] for x in cgx)`` (charge conservation).
+    ``extended_fallback`` lists the indices of the points that ``precision_fallback`` solved
+    (in part) in extended precision.
     """
 
     vg: tuple[float, ...]
@@ -132,6 +142,7 @@ class CVResult:
     method: Literal["qs", "ac"]
     freq_hz: float | None
     dv_qs: float | None
+    extended_fallback: tuple[int, ...] = ()
 
 
 class CVConvergenceError(ConvergenceError):
@@ -224,8 +235,19 @@ def _ident(name: str) -> str:
 # A sweep session: switches the device between Poisson-Boltzmann and drift-diffusion(+circuit)
 # --------------------------------------------------------------------------------------------
 class _Session:
-    def __init__(self, dd, gate: str, *, rel_tol: float, abs_tol: float, max_iterations: int):
+    def __init__(
+        self,
+        dd,
+        gate: str,
+        *,
+        rel_tol: float,
+        abs_tol: float,
+        max_iterations: int,
+        precision_fallback: bool = False,
+    ):
         self.dd = dd
+        self.fallback = precision_fallback
+        self.fallback_used = False
         self.device = device = dd.device
         self.gate = gate
         self.tol = {"rel_tol": rel_tol, "abs_tol": abs_tol, "max_iterations": max_iterations}
@@ -366,7 +388,21 @@ class _Session:
         self.v_gate = float(v)
 
     def solve(self) -> PointInfo:
-        return _solve(self.device, **self.tol)
+        try:
+            return _solve(self.device, **self.tol)
+        except ConvergenceError:
+            if not self.fallback:
+                raise
+        # retry from where the double-precision Newton stopped, in extended precision
+        for name in _PRECISION:
+            devsim.set_parameter(name=name, value=True)
+        try:
+            info = _solve(self.device, **self.tol)
+        finally:
+            for name in _PRECISION:
+                devsim.set_parameter(name=name, value=False)
+        self.fallback_used = True
+        return info
 
     # --- Poisson-Boltzmann (flat quasi-Fermi levels, potential only) ------------------------
     def enter_pb(self) -> None:
@@ -576,6 +612,7 @@ def sweep_cv(
     max_iterations: int = 50,
     extended_precision: bool = True,
     progress: Callable[[str, int, float], None] | None = None,
+    precision_fallback: bool = False,
 ) -> CVResult:
     """Cgg (and, for ``"ac"``, Cxg of every non-gate contact) of ``device`` over ``vg``.
 
@@ -598,6 +635,9 @@ def sweep_cv(
             afterwards.
         progress: optional ``progress(stage, index, vg)``, called after each bias point
             (``"qs"``; or ``"pb"`` then ``"ac"``), whether or not it converged.
+        precision_fallback: ``"qs"`` with ``extended_precision=False`` only: retry a solve
+            that fails in double precision in extended precision, at the same tolerances
+            (see the module notes); ``CVResult.extended_fallback`` lists those points.
 
     Returns:
         A :class:`CVResult`; ``unit`` is F/cm^2 (1D) or F/cm (2D).
@@ -624,6 +664,11 @@ def sweep_cv(
         raise ValueError("rel_tol and abs_tol must be > 0")
     if max_iterations < 1:
         raise ValueError("max_iterations must be >= 1")
+    if precision_fallback and (method != "qs" or extended_precision):
+        raise ValueError(
+            "precision_fallback applies to a QS sweep in double precision "
+            "(method='qs', extended_precision=False)"
+        )
     if method == "ac" and not extended_precision:
         raise ValueError(
             "method 'ac' needs extended precision: the small-signal AC solve loses accuracy in "
@@ -631,8 +676,14 @@ def sweep_cv(
         )
 
     session = _Session(
-        device, gate, rel_tol=rel_tol, abs_tol=abs_tol, max_iterations=max_iterations
+        device,
+        gate,
+        rel_tol=rel_tol,
+        abs_tol=abs_tol,
+        max_iterations=max_iterations,
+        precision_fallback=precision_fallback,
     )
+    fallback_points: list[int] = []
     if method == "ac":
         _check_global_circuit()
     failed: dict[int, str] = {}
@@ -645,6 +696,7 @@ def sweep_cv(
         session.enter_pb()
         pb_states: dict[int, dict] = {}
         for i, v in enumerate(vg):
+            session.fallback_used = False
             try:
                 if method == "qs":
                     lo = session.pb_to(v - dv_qs)
@@ -658,6 +710,8 @@ def sweep_cv(
                     pb_states[i] = session.snapshot()
             except ConvergenceError as e:
                 failed[i] = f"Poisson-Boltzmann: {e}"
+            if session.fallback_used:
+                fallback_points.append(i)
             if progress is not None:
                 progress("qs" if method == "qs" else "pb", i, v)
         if method == "ac":
@@ -697,4 +751,5 @@ def sweep_cv(
         method=method,
         freq_hz=freq_hz,
         dv_qs=dv_qs if method == "qs" else None,
+        extended_fallback=tuple(fallback_points),
     )

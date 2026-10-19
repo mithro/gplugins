@@ -56,7 +56,10 @@ exclude = [
   "https://doi.org/10.1063/1.1529297",
   "https://doi.org/10.1063/1.354551",
   # srim.org is intermittently unreachable and times out
-  "http://www.srim.org/.*"
+  "http://www.srim.org/.*",
+  # www.paraview.org times out (2026-10-19: from GitHub runners and other hosts alike);
+  # linked from notebooks/devsim_01_pin_waveguide.ipynb
+  "https://www.paraview.org/.*"
 ]
 # Exclude paths that contain template variables or are known false positives
 exclude_path = [

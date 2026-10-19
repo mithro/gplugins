@@ -558,3 +558,77 @@ def test_ac_refuses_double_precision() -> None:
     with pytest.raises(ValueError, match="extended precision"):
         sweep_cv(dd, "gate", [0.0], method="ac", freq_hz=1e3, extended_precision=False)
     dd.delete_device()
+
+
+# --------------------------------------------------------------------------------------------
+# precision_fallback: a QS solve that fails in double precision is retried in extended
+# --------------------------------------------------------------------------------------------
+def _double_fails(monkeypatch, fail_at: set[float] | None = None):
+    """Make every double-precision solve at the gate biases ``fail_at`` (all if None) fail."""
+    from gplugins.devsim import cv as cv_mod
+
+    real = cv_mod._solve
+    calls = {"double_failed": 0, "extended": 0}
+
+    def fake(device, **tol):
+        extended = bool(devsim.get_parameter(name="extended_solver"))
+        v = devsim.get_parameter(device=device, name="gate_bias")
+        hit = fail_at is None or any(abs(v - f) < 2e-3 for f in fail_at)
+        if not extended and hit:
+            calls["double_failed"] += 1
+            raise cv_mod.ConvergenceError("forced double-precision failure", None)
+        if extended:
+            calls["extended"] += 1
+        return real(device, **tol)
+
+    monkeypatch.setattr(cv_mod, "_solve", fake)
+    return calls
+
+
+def test_precision_fallback_retries_in_extended(monkeypatch) -> None:
+    """With ``precision_fallback=True`` a QS point whose double-precision solve fails is solved
+    again in extended precision at the same tolerances; the points that needed it are recorded,
+    and the sweep equals the all-extended sweep at those points."""
+    vg = [-1.0, 0.5, 2.0]
+    dd = _poly_stack("fallback", NFET)
+    ref = sweep_cv(dd, "gate", vg, method="qs")
+    calls = _double_fails(monkeypatch, {0.5})
+    names = ("extended_solver", "extended_model", "extended_equation")
+    before = {n: devsim.get_parameter(name=n) for n in names}
+    res = sweep_cv(dd, "gate", vg, method="qs", extended_precision=False, precision_fallback=True)
+    assert res.extended_fallback == (1,)
+    assert calls["double_failed"] >= 2 and calls["extended"] >= 2, calls  # vg - dv and vg + dv
+    assert res.cgg[1] == pytest.approx(ref.cgg[1], rel=1e-9)
+    for x, y in zip(ref.cgg, res.cgg, strict=True):
+        assert abs(y / x - 1) < 1e-6
+    assert {n: devsim.get_parameter(name=n) for n in names} == before  # restored
+    dd.delete_device()
+
+
+def test_no_fallback_raises(monkeypatch) -> None:
+    """Without ``precision_fallback`` the same failure raises CVConvergenceError, as before."""
+    dd = _poly_stack("nofallback", NFET)
+    _double_fails(monkeypatch, {0.5})
+    with pytest.raises(CVConvergenceError) as err:
+        sweep_cv(dd, "gate", [-1.0, 0.5], method="qs", extended_precision=False)
+    assert err.value.points == [0.5]
+    assert sweep_cv(dd, "gate", [-1.0], method="qs").extended_fallback == ()
+    dd.delete_device()
+
+
+def test_fallback_still_raises_if_extended_fails(monkeypatch) -> None:
+    """The retry is at the same tolerances: if extended precision fails too, the point fails."""
+    dd = _poly_stack("fallbackfails", NFET)
+    with pytest.raises(CVConvergenceError):
+        sweep_cv(
+            dd, "gate", [2.0], method="qs", rel_tol=1e-16, max_iterations=2,
+            extended_precision=False, precision_fallback=True,
+        )  # fmt: skip
+    dd.delete_device()
+
+
+def test_fallback_only_for_qs_in_double() -> None:
+    dd = _poly_stack("fallbackargs", NFET)
+    with pytest.raises(ValueError, match="precision_fallback"):
+        sweep_cv(dd, "gate", [0.0], method="qs", precision_fallback=True)  # already extended
+    dd.delete_device()
