@@ -492,3 +492,69 @@ def test_duplicate_vg_reasons_kept() -> None:
     assert [(i, v) for i, v, _ in err.value.reasons] == [(0, 2.0), (1, 2.0)]
     assert all(reason for _, _, reason in err.value.reasons)
     dd.delete_device()
+
+
+# --------------------------------------------------------------------------------------------
+# Progress reporting and the precision switch
+# --------------------------------------------------------------------------------------------
+@pytest.mark.parametrize("method", ["qs", "ac"])
+def test_progress_called_per_point(method) -> None:
+    """``progress(stage, index, vg)`` is called once per bias point and stage, in sweep order."""
+    vg = [-1.0, 0.5, 2.0]
+    calls = []
+    dd = _poly_stack(f"progress_{method}", NFET)
+    kw = {"freq_hz": 1e3} if method == "ac" else {}
+    res = sweep_cv(dd, "gate", vg, method=method, progress=lambda *a: calls.append(a), **kw)
+    stages = ("qs",) if method == "qs" else ("pb", "ac")
+    assert calls == [(s, i, v) for s in stages for i, v in enumerate(vg)]
+    assert len(res.cgg) == len(vg)
+    dd.delete_device()
+
+
+def test_progress_reports_failed_points_too() -> None:
+    calls = []
+    dd = _poly_stack("progress_fail", NFET)
+    with pytest.raises(CVConvergenceError):
+        sweep_cv(
+            dd, "gate", [2.0], method="qs", rel_tol=1e-16, max_iterations=2,
+            progress=lambda *a: calls.append(a),
+        )  # fmt: skip
+    assert calls == [("qs", 0, 2.0)]
+    dd.delete_device()
+
+
+def test_extended_precision_switch() -> None:
+    """QS with ``extended_precision=False`` solves in double precision: the same Cgg within the
+    solver noise, and DEVSIM's precision settings are restored afterwards.
+
+    Both sweeps converge to rel_tol 1e-10 on every charge. A QS Cgg is a 2 mV central difference
+    of charges up to |Q| ~ C * 6 V, so its noise is up to rel_tol * 6 V / 1 mV = 6e-7 relative;
+    the bound is 1e-6 (measured: about 1e-8).
+    """
+    vg = [-3.0, 0.0, 0.8, 3.0]
+    dd = _poly_stack("prec_qs", NFET)
+    seen = []
+
+    def spy(*_):
+        seen.append(devsim.get_parameter(name="extended_solver"))
+
+    for name in ("extended_solver", "extended_model", "extended_equation"):
+        devsim.set_parameter(name=name, value=True)
+    a = sweep_cv(dd, "gate", vg, method="qs")
+    b = sweep_cv(dd, "gate", vg, method="qs", extended_precision=False, progress=spy)
+    assert seen and not any(seen)  # double precision during the sweep
+    for name in ("extended_solver", "extended_model", "extended_equation"):
+        assert devsim.get_parameter(name=name) is True  # restored
+    for x, y in zip(a.cgg, b.cgg, strict=True):
+        assert abs(y / x - 1) < 1e-6, (x, y)
+    dd.delete_device()
+
+
+def test_ac_refuses_double_precision() -> None:
+    """In double precision the 1 kHz AC Cgg near the onset of inversion moves by about 1e-3
+    (measured 1.1e-3 at Cgg = 0.35 Cox) although every DC point converges, so AC refuses it.
+    """
+    dd = _poly_stack("prec_ac", NFET)
+    with pytest.raises(ValueError, match="extended precision"):
+        sweep_cv(dd, "gate", [0.0], method="ac", freq_hz=1e3, extended_precision=False)
+    dd.delete_device()

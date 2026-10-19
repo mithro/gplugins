@@ -57,15 +57,24 @@ first source then fails, the AC sweep raises ``ValueError`` naming that likely c
 nothing is deleted (the circuit is deleted only if one of the sweep's own sources was added).
 
 The sweep leaves the device as it found it: its equations, contact biases and solution are
-restored afterwards (also when it raises), as is DEVSIM's extended precision setting (which
-the sweep switches on).
+restored afterwards (also when it raises), as is DEVSIM's extended precision setting, which
+the sweep switches on (``extended_precision=True``, the default) or, for ``"qs"`` only, off
+(``False``: double precision, about twice as fast on large 2D meshes, with the same tolerances
+checked). The AC solve needs extended precision: in double precision the 1 kHz AC Cgg of the
+1D nfet stack near the onset of inversion moves by 1.1e-3 relative although every DC point
+converges to rel_tol 1e-10, so ``"ac"`` refuses ``extended_precision=False``.
+
+Progress. A long sweep (a fine 2D mesh takes hours) can report each bias point through
+``progress(stage, index, vg)``, called after the point is done (converged or not), in sweep
+order: stage ``"qs"`` for every point of a QS sweep; ``"pb"`` (its Poisson-Boltzmann point)
+and then ``"ac"`` (its drift-diffusion point and AC solve) for every point of an AC sweep.
 """
 
 from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal
@@ -565,6 +574,8 @@ def sweep_cv(
     rel_tol: float = 1e-10,
     abs_tol: float = 1e-12,
     max_iterations: int = 50,
+    extended_precision: bool = True,
+    progress: Callable[[str, int, float], None] | None = None,
 ) -> CVResult:
     """Cgg (and, for ``"ac"``, Cxg of every non-gate contact) of ``device`` over ``vg``.
 
@@ -582,6 +593,11 @@ def sweep_cv(
         abs_tol: the largest accepted potential update (V) of the last iteration, checked on
             every ``PotentialEquation``.
         max_iterations: Newton iterations per solve.
+        extended_precision: solve with DEVSIM's extended (128-bit) solver, model and equation
+            precision (default), or in double precision (``False``, ``"qs"`` only). Restored
+            afterwards.
+        progress: optional ``progress(stage, index, vg)``, called after each bias point
+            (``"qs"``; or ``"pb"`` then ``"ac"``), whether or not it converged.
 
     Returns:
         A :class:`CVResult`; ``unit`` is F/cm^2 (1D) or F/cm (2D).
@@ -608,6 +624,11 @@ def sweep_cv(
         raise ValueError("rel_tol and abs_tol must be > 0")
     if max_iterations < 1:
         raise ValueError("max_iterations must be >= 1")
+    if method == "ac" and not extended_precision:
+        raise ValueError(
+            "method 'ac' needs extended precision: the small-signal AC solve loses accuracy in "
+            "double precision (see the module notes)"
+        )
 
     session = _Session(
         device, gate, rel_tol=rel_tol, abs_tol=abs_tol, max_iterations=max_iterations
@@ -620,7 +641,7 @@ def sweep_cv(
     cgx: dict[str, dict[int, float]] = {c: {} for c in session.others}
     try:
         for name in _PRECISION:
-            devsim.set_parameter(name=name, value=True)
+            devsim.set_parameter(name=name, value=bool(extended_precision))
         session.enter_pb()
         pb_states: dict[int, dict] = {}
         for i, v in enumerate(vg):
@@ -637,22 +658,28 @@ def sweep_cv(
                     pb_states[i] = session.snapshot()
             except ConvergenceError as e:
                 failed[i] = f"Poisson-Boltzmann: {e}"
+            if progress is not None:
+                progress("qs" if method == "qs" else "pb", i, v)
         if method == "ac":
             session.enter_dd_circuit()
             omega = 2 * math.pi * freq_hz
             for i, v in enumerate(vg):
                 if i not in pb_states:
+                    if progress is not None:
+                        progress("ac", i, v)
                     continue
                 session.load_dd(pb_states[i], v)
                 try:
                     points[i] = session.solve()
                 except ConvergenceError as e:
                     failed[i] = f"drift-diffusion from the Poisson-Boltzmann guess: {e}"
-                    continue
-                current = session.ac(freq_hz)
-                cgg[i] = current[gate].imag / omega
-                for c in session.others:
-                    cgx[c][i] = -current[c].imag / omega
+                else:
+                    current = session.ac(freq_hz)
+                    cgg[i] = current[gate].imag / omega
+                    for c in session.others:
+                        cgx[c][i] = -current[c].imag / omega
+                if progress is not None:
+                    progress("ac", i, v)
     finally:
         session.restore()
     if failed:
