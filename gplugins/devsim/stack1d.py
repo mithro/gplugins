@@ -36,7 +36,7 @@ from gplugins.devsim.device_description import (
     graded_spacings,
 )
 from gplugins.devsim.device_description import (  # the old private name
-    check_1d_contacts as _check_contacts,
+    check_1d_contacts as _check_contacts,  # noqa: F401
 )
 
 __all__ = ["UM_TO_CM", "Layer1D", "Mesh1D", "create_1d_stack", "graded_spacings"]

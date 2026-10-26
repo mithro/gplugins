@@ -39,7 +39,7 @@ from devsim.python_packages import model_create, simple_physics
 # The contact and interface types are backend-neutral; they live in the device description
 # (the backend seam) and are re-exported here unchanged.
 from gplugins.devsim.device_description import (
-    _KINDS,
+    _KINDS,  # noqa: F401 (re-exported under its old private name)
     Contact,
     ContactKind,
     InterfaceKind,
