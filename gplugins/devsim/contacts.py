@@ -32,76 +32,41 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import Literal
 
 import devsim
 from devsim.python_packages import model_create, simple_physics
 
-ContactKind = Literal["ohmic", "gate"]
-InterfaceKind = Literal["potential", "drift_diffusion"]
+# The contact and interface types are backend-neutral; they live in the device description
+# (the backend seam) and are re-exported here unchanged.
+from gplugins.devsim.device_description import (
+    _KINDS,
+    Contact,
+    ContactKind,
+    InterfaceKind,
+    InterfaceRef,
+    LayerRef,
+    check_contact_region,
+    interface_kind,
+)
 
-_KINDS = ("ohmic", "gate")
-
-
-@dataclass(frozen=True)
-class LayerRef:
-    """A GDS contact layer ``(layer, datatype)`` (2D only)."""
-
-    layer: tuple[int, int]
-
-    def __post_init__(self) -> None:
-        layer = tuple(self.layer)
-        if len(layer) != 2 or not all(isinstance(v, int) for v in layer):
-            raise ValueError(f"LayerRef.layer must be (layer, datatype) ints, got {self.layer!r}")
-        object.__setattr__(self, "layer", layer)
-
-
-@dataclass(frozen=True)
-class InterfaceRef:
-    """The boundary between regions ``a`` and ``b``; ``b=None`` is ``a``'s outer boundary."""
-
-    a: str
-    b: str | None = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.a, str) or not self.a:
-            raise ValueError(f"InterfaceRef.a must be a region name, got {self.a!r}")
-        if self.b is not None and (not isinstance(self.b, str) or not self.b):
-            raise ValueError(f"InterfaceRef.b must be a region name or None, got {self.b!r}")
-
-    @property
-    def gmsh_names(self) -> tuple[str, ...]:
-        """The mesh physical-group names this boundary may have (meshwell's ``a___b``)."""
-        if self.b is None:
-            return (f"{self.a}___None",)
-        return (f"{self.a}___{self.b}", f"{self.b}___{self.a}")
-
-
-@dataclass(frozen=True)
-class Contact:
-    """A device contact: a named boundary with an ohmic or metal-gate boundary condition."""
-
-    name: str
-    location: LayerRef | InterfaceRef
-    kind: ContactKind
-    workfunction_offset_v: float = 0.0
-    circuit: bool = False
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name:
-            raise ValueError(f"Contact.name must be a non-empty string, got {self.name!r}")
-        if not isinstance(self.location, LayerRef | InterfaceRef):
-            raise TypeError(
-                f"Contact.location must be a LayerRef or InterfaceRef, got {self.location!r}"
-            )
-        if self.kind not in _KINDS:
-            raise ValueError(f"Contact.kind must be one of {_KINDS}, got {self.kind!r}")
-        if self.kind == "ohmic" and self.workfunction_offset_v != 0.0:
-            raise ValueError(
-                f"contact {self.name!r}: workfunction_offset_v is a metal-gate (kind='gate') "
-                "property; an ohmic contact has none"
-            )
+__all__ = [
+    "Contact",
+    "ContactKind",
+    "InterfaceKind",
+    "InterfaceRef",
+    "LayerRef",
+    "bias_name",
+    "check_contact_region",
+    "contacts_from_contact_info",
+    "create_contact_drift_diffusion",
+    "create_contact_potential_only",
+    "create_interface_carriers",
+    "create_interface_potential",
+    "delete_circuit",
+    "gds_layer",
+    "interface_kind",
+    "source_name",
+]
 
 
 def bias_name(contact: str) -> str:
@@ -189,15 +154,6 @@ def contacts_from_contact_info(contact_info: Mapping[str, Mapping], full_layer_s
 # --------------------------------------------------------------------------------------------
 # Interfaces
 # --------------------------------------------------------------------------------------------
-def interface_kind(class0: str | None, class1: str | None) -> InterfaceKind | None:
-    """The interface model for a pair of region classes (``"silicon"``, ``"oxide"``, None)."""
-    if class0 is None or class1 is None:
-        return None
-    if class0 == class1 == "silicon":
-        return "drift_diffusion"
-    return "potential"
-
-
 def create_interface_potential(device: str, interface: str) -> None:
     """Continuous ``Potential`` across ``interface``."""
     simple_physics.CreateSiliconOxideInterface(device, interface)
@@ -226,16 +182,6 @@ def create_interface_carriers(device: str, interface: str) -> None:
 # --------------------------------------------------------------------------------------------
 # Contact equations
 # --------------------------------------------------------------------------------------------
-def check_contact_region(contact: Contact, region: str, region_class: str | None) -> None:
-    """Raise unless ``contact``'s kind fits the class of the region it is placed on."""
-    want = {"ohmic": "silicon", "gate": "oxide"}[contact.kind]
-    if region_class != want:
-        raise ValueError(
-            f"contact {contact.name!r} ({contact.kind}) needs a {want} region, but "
-            f"{region!r} is {region_class or 'equation-free'}"
-        )
-
-
 def create_contact_potential_only(
     device: str, region: str, contact: Contact, region_class: str | None
 ) -> None:
