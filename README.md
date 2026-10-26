@@ -35,7 +35,7 @@ fork as its `third_party/gplugins` git submodule and restores and extends the
   `tests/test_device_description.py` enforces that.
 - `gplugins/devsim/backends/devsim.py`: the DEVSIM backend (`DDComponent`,
   `create_1d_device`, `run_cv_sweep`). `gplugins.devsim.get_solver` is an alias of it.
-- A `backends/charon.py` is added beside it, consuming the same description. The contract
+- A `backends/charon.py` is to be added beside it, consuming the same description. The contract
   a backend follows is in the `device_description` module docstring.
 
 ## GDSFactory plugins
