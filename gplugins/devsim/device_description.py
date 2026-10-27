@@ -2,17 +2,18 @@
 """The backend-neutral device description of gplugins.devsim (the backend seam).
 
 **The seam.** A TCAD job is described once, as plain frozen data, and a *backend* turns that
-description into a simulation. This module holds the description; ``gplugins.devsim.backends``
-holds the backends. Today there is one, :mod:`gplugins.devsim.backends.devsim` (DEVSIM). A
-``backends/charon.py`` (Charon) is to be added beside it so that both simulators solve the same
-description (gf180-tcad spec §12.1, https://github.com/mithro/gf180-tcad, issue #44).
+description into a simulation. This module holds the description and :mod:`gplugins.devsim.results`
+what a backend returns; ``gplugins.devsim.backends`` holds the backends. Today there is one,
+:mod:`gplugins.devsim.backends.devsim` (DEVSIM). A Charon backend, the package
+``gplugins.devsim.backends.charon`` (a stub so far), is to consume the same description
+(gf180-tcad spec §12.1, https://github.com/mithro/gf180-tcad, issue #44).
 
 The description covers:
 
 - **mesh**: a 1D stack's layers and node spacing (:class:`Layer1D`, :class:`Mesh1D`,
   :class:`Stack1D`, whose :meth:`Stack1D.node_positions_um` are the mesh nodes), or a 2D
   cross-section of a gdsfactory component that a mesher turns into a mesh
-  (:class:`CrossSection2D`);
+  (:class:`CrossSection2D`; see its limits there);
 - **regions and materials**: a region's class, ``"silicon"``, ``"oxide"`` or ``None`` (no
   equations, e.g. a metal electrode), from its material name (:func:`material_class`);
 - **contacts**: :class:`Contact` on a :class:`LayerRef` or an :class:`InterfaceRef`, with the
@@ -23,37 +24,46 @@ The description covers:
   ``doping_info`` of a :class:`CrossSection2D`;
 - **physical constants and models**: :class:`~gplugins.devsim.constants.Constants` (the one
   constants table; Boltzmann statistics, constant mobility, SRH);
-- **solver settings**: :class:`SolverSettings`;
+- **equilibrium solve settings**: :class:`SolverSettings`;
 - **bias plan**: :class:`CVSweep`, a gate C-V sweep.
 
 **The contract for a backend** (``gplugins.devsim.backends.<name>``):
 
-1. This module, and everything it imports, imports no simulator or mesher (no ``devsim``, no
-   ``meshwell``, no ``gplugins.devsim.backends``). ``test_device_description.py`` checks this
-   in a fresh interpreter in which those imports fail.
-2. A backend consumes the description read-only and adds nothing to it. Everything a result
-   depends on (geometry, node positions, doping, constants, contacts, tolerances, biases) is in
-   the description; what a backend chooses itself (equation assembly, discretisation, file
-   formats, device and mesh names) stays in the backend.
+1. This module, :mod:`gplugins.devsim.results`, and everything they import, import no simulator
+   or mesher (no ``devsim``, ``meshwell``, ``gmsh`` or ``gplugins.devsim.backends``), and
+   ``import gplugins.devsim`` itself imports nothing (the package is lazy).
+   ``tests/test_device_description.py`` checks this in fresh interpreters in which those
+   imports fail, also for ``gplugins.devsim.backends.charon``.
+2. A backend consumes the description read-only and adds nothing to it. The description holds
+   the physics and the bias plan: geometry, node positions, doping, constants, contacts, the
+   equilibrium solve's tolerances (:class:`SolverSettings`) and the swept biases
+   (:class:`CVSweep`). The sweep's solver options (tolerances, precision, fallbacks; the
+   ``**options`` of ``run_cv_sweep``) are backend options: the caller passes them and records
+   them in its own provenance. What a backend chooses itself (equation assembly,
+   discretisation, file formats, device and mesh names) stays in the backend.
 3. The physics is the description's: a backend sets every constant from
    :class:`~gplugins.devsim.constants.Constants` and never uses a simulator default. A model a
    backend lacks is not approximated: the backend raises, and the job is marked not
    comparable for that model (spec §12.1).
-4. A backend provides ``create_1d_device(stack: Stack1D)`` (a solved equilibrium device) and
-   ``run_cv_sweep(device, sweep: CVSweep, **options)``; the DEVSIM backend's are
-   :func:`gplugins.devsim.backends.devsim.create_1d_device` and
-   :func:`gplugins.devsim.backends.devsim.run_cv_sweep`.
+4. A backend module provides the functions of :class:`Backend`: ``create_1d_device(stack)``
+   and ``create_2d_device(cross_section, **options)``, each a solved equilibrium
+   :class:`Device`, and ``run_cv_sweep(device, sweep, **options)``, a
+   :class:`~gplugins.devsim.results.CVResult` (raising
+   :class:`~gplugins.devsim.results.CVConvergenceError`). The DEVSIM backend's are in
+   :mod:`gplugins.devsim.backends.devsim`.
 5. Names are shared: regions are the layer names, the interface between layers ``a`` and ``b``
    is ``a___b`` and contacts are the :class:`Contact` names, so results of two backends can be
    compared per region and per contact.
 
-The public API predating the seam is unchanged: ``gplugins.devsim.contacts``,
-``gplugins.devsim.materials`` and ``gplugins.devsim.stack1d`` re-export the names that moved
-here, and ``gplugins.devsim.get_solver`` is :mod:`gplugins.devsim.backends.devsim`.
+The types are frozen but shallow: a mapping field (``Mesh1D.spacing_um``,
+``CrossSection2D.doping_info``, ``resolutions``) is a plain dict, so these objects are not
+hashable and their mappings must not be mutated after construction.
 
-The package ``gplugins/devsim/__init__.py`` still imports DEVSIM eagerly, so in an image without
-DEVSIM ``import gplugins.devsim.device_description`` fails through the package; making that
-import lazy is left to the Charon backend's change.
+The public API predating the seam is unchanged: ``gplugins.devsim.contacts``,
+``gplugins.devsim.materials``, ``gplugins.devsim.stack1d``, ``gplugins.devsim.cv`` and
+``gplugins.devsim.convergence`` re-export the names that moved here or to
+:mod:`gplugins.devsim.results`, and ``gplugins.devsim.get_solver`` is
+:mod:`gplugins.devsim.backends.devsim`.
 """
 
 from __future__ import annotations
@@ -61,16 +71,19 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from gplugins.devsim.constants import CONSTANTS, Constants
 from gplugins.devsim.doping import DopantKind, DopingProfile
 
 if TYPE_CHECKING:
     from gplugins.devsim.doping import DopingLayerLevel
+    from gplugins.devsim.results import CVResult
 
 __all__ = [
     "OXIDE_MATERIALS",
+    "Backend",
+    "Device",
     "SILICON_MATERIALS",
     "CVSweep",
     "Contact",
@@ -127,6 +140,7 @@ class LayerRef:
     layer: tuple[int, int]
 
     def __post_init__(self) -> None:
+        """Validate (and normalise) the fields; raise ValueError/TypeError if invalid."""
         layer = tuple(self.layer)
         if len(layer) != 2 or not all(isinstance(v, int) for v in layer):
             raise ValueError(f"LayerRef.layer must be (layer, datatype) ints, got {self.layer!r}")
@@ -141,6 +155,7 @@ class InterfaceRef:
     b: str | None = None
 
     def __post_init__(self) -> None:
+        """Validate (and normalise) the fields; raise ValueError/TypeError if invalid."""
         if not isinstance(self.a, str) or not self.a:
             raise ValueError(f"InterfaceRef.a must be a region name, got {self.a!r}")
         if self.b is not None and (not isinstance(self.b, str) or not self.b):
@@ -165,6 +180,7 @@ class Contact:
     circuit: bool = False
 
     def __post_init__(self) -> None:
+        """Validate (and normalise) the fields; raise ValueError/TypeError if invalid."""
         if not isinstance(self.name, str) or not self.name:
             raise ValueError(f"Contact.name must be a non-empty string, got {self.name!r}")
         if not isinstance(self.location, LayerRef | InterfaceRef):
@@ -227,9 +243,14 @@ class CVSweep:
     dv_qs: float = 1e-3
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "vg", tuple(self.vg))
+        """Validate (and normalise) the fields; raise ValueError/TypeError if invalid."""
+        object.__setattr__(self, "vg", tuple(float(v) for v in self.vg))
         if self.method not in ("qs", "ac"):
             raise ValueError(f"CVSweep.method must be 'qs' or 'ac', got {self.method!r}")
+        if not self.vg:
+            raise ValueError("CVSweep.vg must not be empty")
+        if self.method == "ac" and not (self.freq_hz is not None and self.freq_hz > 0):
+            raise ValueError(f"CVSweep method 'ac' needs freq_hz > 0, got {self.freq_hz!r}")
 
 
 # --------------------------------------------------------------------------------------------
@@ -251,6 +272,7 @@ class Layer1D:
     dopant: DopantKind | None = None
 
     def __post_init__(self) -> None:
+        """Validate (and normalise) the fields; raise ValueError/TypeError if invalid."""
         if not isinstance(self.name, str) or not self.name or "___" in self.name:
             raise ValueError(f"Layer1D.name must be a non-empty name without '___': {self.name!r}")
         if self.material not in ("silicon", "oxide"):
@@ -282,6 +304,7 @@ class Mesh1D:
     max_ratio: float = 1.25
 
     def __post_init__(self) -> None:
+        """Validate (and normalise) the fields; raise ValueError/TypeError if invalid."""
         if not (self.max_ratio > 1 and math.isfinite(self.max_ratio)):
             raise ValueError(f"Mesh1D.max_ratio must be > 1, got {self.max_ratio!r}")
         spacing = {}
@@ -380,6 +403,7 @@ class Stack1D:
     )
 
     def __post_init__(self) -> None:
+        """Validate (and normalise) the fields; raise ValueError/TypeError if invalid."""
         object.__setattr__(self, "layers", tuple(self.layers))
         object.__setattr__(self, "contacts", tuple(self.contacts))
         if not self.layers:
@@ -471,10 +495,19 @@ class Stack1D:
 class CrossSection2D:
     """A 2D device: the cross-section of a gdsfactory component along ``xsection_bounds``.
 
-    The fields are the geometry, doping, contact and mesh inputs of
-    :class:`gplugins.devsim.backends.devsim.DDComponent` (see there); the mesher turns them
-    into regions named by layer and interfaces ``a___b``. ``mesh_scaling_factor`` converts um
-    to the backend's length unit (1e-4: cm).
+    The fields are the geometry, doping, contact and mesh inputs of the
+    :class:`gplugins.devsim.backends.devsim.DDComponent` constructor (see there), and nothing
+    more; the mesher turns them into regions named by layer and interfaces ``a___b``.
+    ``mesh_scaling_factor`` converts um to the backend's length unit (1e-4: cm).
+
+    **Limits.** This mirrors the DDComponent constructor only. It does not yet express the
+    gf180-tcad 2D MOS capacitor or its mesh: that job calls the mesher
+    (``gplugins.devsim.get_simulation.create_2Duz_simulation``) directly with
+    ``default_resolution_min/max``, ``background_padding``, ``point_tolerance`` and meshwell
+    ``ResolutionSpec`` objects (``resolutions`` here is typed ``Mapping[str, dict]``), assigns
+    the doping per region after meshing (``assign_doping`` with ``surface_um`` and
+    ``depth_sign``), and wraps the device with ``DDComponent.from_device``. Extending this
+    description to that job is gf180-tcad's Charon plan, Task E.
     """
 
     component: Any
@@ -494,4 +527,36 @@ class CrossSection2D:
     background_tag: str | None = None
 
     def __post_init__(self) -> None:
+        """Validate (and normalise) the fields; raise ValueError/TypeError if invalid."""
         object.__setattr__(self, "contacts", tuple(self.contacts))
+
+
+# --------------------------------------------------------------------------------------------
+# The backend interface
+# --------------------------------------------------------------------------------------------
+@runtime_checkable
+class Device(Protocol):
+    """A solved device returned by a backend; :meth:`delete_device` frees it in the backend."""
+
+    def delete_device(self) -> None:
+        """Free the device (and its mesh) in the backend."""
+
+
+@runtime_checkable
+class Backend(Protocol):
+    """The functions a backend module provides (contract point 4); a module conforms by name.
+
+    ``isinstance(gplugins.devsim.backends.devsim, Backend)`` is true.
+    """
+
+    def create_1d_device(self, stack: Stack1D) -> Device:
+        """Build ``stack`` and solve its equilibrium (0 V on every contact)."""
+
+    def create_2d_device(self, cross_section: CrossSection2D, **options: Any) -> Device:
+        """Mesh ``cross_section``, build it and solve its equilibrium.
+
+        ``options`` are the backend's own choices (file and object names), not physics.
+        """
+
+    def run_cv_sweep(self, device: Device, sweep: CVSweep, **options: Any) -> CVResult:
+        """Run the bias plan ``sweep`` on ``device``; ``options`` are solver options."""

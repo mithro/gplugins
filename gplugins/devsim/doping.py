@@ -101,7 +101,12 @@ class DopingProfile:
         raise NotImplementedError
 
     def expression(self, x_um: str, y_um: str) -> str:
-        """The profile as a DEVSIM expression of the expressions ``x_um`` and ``y_um``."""
+        """The profile as a DEVSIM expression of the expressions ``x_um`` and ``y_um``.
+
+        The string is in DEVSIM's model-expression syntax (``erfc``, ``exp``, ``step``...),
+        so it is DEVSIM-specific; another backend evaluates the profile with ``__call__``
+        (numpy), not this string.
+        """
         raise NotImplementedError
 
     def open_edges(

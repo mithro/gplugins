@@ -31,12 +31,19 @@ fork as its `third_party/gplugins` git submodule and restores and extends the
 
 - `gplugins/devsim/device_description.py`: the backend-neutral description, plain frozen
   data (1D stack and its mesh nodes, 2D cross-section, regions and materials, contacts,
-  doping, constants, solver settings, C-V bias plan). It imports no simulator or mesher;
-  `tests/test_device_description.py` enforces that.
+  doping, constants, equilibrium solve settings, C-V bias plan), and the `Backend` protocol
+  that a backend module implements (`create_1d_device`, `create_2d_device`, `run_cv_sweep`).
+  `gplugins/devsim/results.py`: what a backend returns or raises (`CVResult`, `PointInfo`,
+  `ConvergenceError`, `CVConvergenceError`). Neither imports a simulator or mesher, and
+  `import gplugins.devsim` is lazy; `tests/test_device_description.py` enforces both.
 - `gplugins/devsim/backends/devsim.py`: the DEVSIM backend (`DDComponent`,
-  `create_1d_device`, `run_cv_sweep`). `gplugins.devsim.get_solver` is an alias of it.
-- A `backends/charon.py` is to be added beside it, consuming the same description. The contract
-  a backend follows is in the `device_description` module docstring.
+  `create_1d_device`, `create_2d_device`, `run_cv_sweep`). `gplugins.devsim.get_solver` is an
+  alias of it.
+- `gplugins/devsim/backends/charon/`: the Charon backend, a stub so far, consuming the same
+  description. The contract a backend follows is in the `device_description` module docstring.
+- Limit: `CrossSection2D` mirrors the `DDComponent` constructor only. It does not yet express
+  gf180-tcad's 2D MOS capacitor or its mesh (that job calls the mesher and `assign_doping`
+  directly); extending it is gf180-tcad's Charon plan, Task E.
 
 ## GDSFactory plugins
 

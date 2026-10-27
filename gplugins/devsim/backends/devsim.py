@@ -6,8 +6,9 @@ states the contract). It turns a backend-neutral description into a solved DEVSI
 
 - :func:`create_1d_device` builds and solves a :class:`~gplugins.devsim.device_description.Stack1D`
   (what :func:`gplugins.devsim.stack1d.create_1d_stack` calls);
-- :meth:`DDComponent.from_description` takes a
-  :class:`~gplugins.devsim.device_description.CrossSection2D`, meshed by :meth:`DDComponent.ddsolver`;
+- :func:`create_2d_device` meshes and solves a
+  :class:`~gplugins.devsim.device_description.CrossSection2D`
+  (:meth:`DDComponent.from_description`, then :meth:`DDComponent.ddsolver`);
 - :meth:`DDComponent.from_device` wraps a DEVSIM device built elsewhere;
 - :func:`run_cv_sweep` runs a :class:`~gplugins.devsim.device_description.CVSweep` with
   :func:`gplugins.devsim.cv.sweep_cv`.
@@ -279,8 +280,7 @@ class DDComponent:
         devsim_device_name: str = "temp",
         devsim_simulation_filename: str | None = "devsim.dat",
     ) -> DDComponent:
-        """A DDComponent for the 2D cross-section ``description``; mesh and solve it with
-        :meth:`ddsolver`.
+        """A DDComponent for the 2D cross-section ``description``; :meth:`ddsolver` solves it.
 
         The keyword arguments are DEVSIM-backend choices (the mesh file and DEVSIM's names),
         not part of the description. The result is the same as passing the description's
@@ -846,6 +846,18 @@ def create_1d_device(stack: Stack1D) -> DDComponent:
         if any(c.circuit for c in contacts):
             contacts_mod.delete_circuit()
         raise
+
+
+def create_2d_device(cross_section: CrossSection2D, **options) -> DDComponent:
+    """Mesh ``cross_section``, build it as a DEVSIM device and solve its equilibrium.
+
+    :meth:`DDComponent.from_description` then :meth:`DDComponent.ddsolver`. ``options`` are
+    from_description's DEVSIM choices (``temp_file_name``, ``devsim_mesh_name``,
+    ``devsim_device_name``, ``devsim_simulation_filename``).
+    """
+    device = DDComponent.from_description(cross_section, **options)
+    device.ddsolver()
+    return device
 
 
 def run_cv_sweep(device: DDComponent, sweep: CVSweep, **options) -> CVResult:

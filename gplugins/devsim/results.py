@@ -27,6 +27,7 @@ class ConvergenceError(RuntimeError):
     """
 
     def __init__(self, message: str, info: dict | None = None) -> None:
+        """``message`` and DEVSIM's solve ``info`` (or None)."""
         super().__init__(message)
         self.info = info
 
@@ -105,6 +106,7 @@ class CVConvergenceError(ConvergenceError):
     def __init__(
         self, points: Sequence[float], reasons: Sequence[tuple[int, float, str]] | None = None
     ) -> None:
+        """The failed gate voltages ``points`` and their ``(index, vg, reason)``."""
         self.points = [float(v) for v in points]
         self.reasons = [(int(i), float(v), str(r)) for i, v, r in (reasons or ())]
         detail = "; ".join(f"vg[{i}]={v!r}: {r}" for i, v, r in self.reasons) or repr(self.points)

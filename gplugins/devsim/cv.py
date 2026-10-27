@@ -753,6 +753,10 @@ def sweep_cv(
             round-off near psi = 0 under conditions (a)-(d) of the module notes;
             ``CVResult.roundoff_accepted`` records each one.
 
+    The result depends on the device's state at entry (DEVSIM keeps solver state across
+    solves): sweep a freshly built device for bit-reproducible results; a second sweep
+    of the same device agrees to round-off only.
+
     Returns:
         A :class:`CVResult`; ``unit`` is F/cm^2 (1D) or F/cm (2D).
 
