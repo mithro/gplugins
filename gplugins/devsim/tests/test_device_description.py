@@ -136,7 +136,11 @@ def test_get_solver_is_the_devsim_backend() -> None:
 
     assert get_solver is backend
     assert sys.modules["gplugins.devsim.get_solver"] is backend
-    assert DDComponent is backend.DDComponent is gd.DDComponent
+    assert DDComponent is backend.DDComponent
+    # test_get_solver.py reloads the module, which makes a new class object; the package
+    # attribute keeps the one from its own import, so compare where it is defined.
+    assert gd.DDComponent.__module__ == backend.__name__
+    assert gd.DDComponent.__qualname__ == "DDComponent"
 
 
 # --------------------------------------------------------------------------------------------
@@ -180,7 +184,9 @@ def test_stack1d_nodes_are_graded_spacings() -> None:
         inside = xs[boundary_node[i] : boundary_node[i + 1] + 1]
         want = dd_mod.graded_spacings(layer.thickness_um, *MESH.spacing_um[layer.name])
         got = [b - a for a, b in zip(inside, inside[1:])]
-        assert got == pytest.approx(want, rel=1e-12, abs=0)
+        # Positions are accumulated, so a difference of neighbours carries the rounding
+        # of the position (~eps * x), relative to a spacing up to x/h larger (x/h <= 1e4).
+        assert got == pytest.approx(want, rel=1e-9, abs=0)
 
 
 @pytest.mark.parametrize(
@@ -258,16 +264,22 @@ def test_run_cv_sweep_matches_sweep_cv(clean_devsim) -> None:
     from gplugins.devsim.backends.devsim import run_cv_sweep
     from gplugins.devsim.cv import sweep_cv
 
+    # Each sweep on a freshly built device: DEVSIM keeps solver state across solves, so a
+    # second sweep on the same device agrees only to round-off.
     vg = [-1.0, 0.0, 1.0]
-    dev = create_1d_stack("seam_cv", list(_layers()), list(CONTACTS), MESH, CONSTANTS)
-    try:
-        direct = sweep_cv(dev, "gate", vg, method="qs", dv_qs=2e-3, rel_tol=1e-10)
-        planned = run_cv_sweep(
-            dev, dd_mod.CVSweep("gate", vg, "qs", dv_qs=2e-3), rel_tol=1e-10
-        )
-    finally:
-        dev.delete_device()
-    assert planned == direct
+    results = []
+    for run in (
+        lambda d: sweep_cv(d, "gate", vg, method="qs", dv_qs=2e-3, rel_tol=1e-10),
+        lambda d: run_cv_sweep(d, dd_mod.CVSweep("gate", vg, "qs", dv_qs=2e-3), rel_tol=1e-10),
+    ):
+        dev = create_1d_stack("seam_cv", list(_layers()), list(CONTACTS), MESH, CONSTANTS)
+        try:
+            results.append(run(dev))
+        finally:
+            dev.delete_device()
+    direct, planned = results
+    for f in dataclasses.fields(direct):
+        assert getattr(planned, f.name) == getattr(direct, f.name), f.name
 
 
 def test_from_description_matches_the_constructor() -> None:
