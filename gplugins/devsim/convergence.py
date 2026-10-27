@@ -11,17 +11,10 @@ from __future__ import annotations
 
 import devsim
 
+# Backend-neutral; lives in gplugins.devsim.results (the backend seam), re-exported here.
+from gplugins.devsim.results import ConvergenceError
 
-class ConvergenceError(RuntimeError):
-    """A DEVSIM solve did not converge at the requested tolerances.
-
-    ``info`` is DEVSIM's solve info (``converged``, ``iterations`` with the per-iteration
-    errors) when DEVSIM returned one, else ``None``.
-    """
-
-    def __init__(self, message: str, info: dict | None = None) -> None:
-        super().__init__(message)
-        self.info = info
+__all__ = ["ConvergenceError", "solve_dc"]
 
 
 def solve_dc(
