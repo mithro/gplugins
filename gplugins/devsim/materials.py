@@ -27,12 +27,19 @@ silicon too), ``"oxide"`` (Poisson only) or ``None`` (no equations, e.g. a metal
 
 from __future__ import annotations
 
-from typing import Literal
-
 import devsim
 from devsim.python_packages import model_create, simple_physics
 
 from gplugins.devsim.constants import CONSTANTS, Constants
+
+# Region classes and material names are backend-neutral: they live in the device description
+# (the backend seam) and are re-exported here unchanged.
+from gplugins.devsim.device_description import (
+    OXIDE_MATERIALS,
+    SILICON_MATERIALS,
+    RegionClass,
+    material_class,
+)
 
 __all__ = [
     "CONSTANTS",
@@ -50,13 +57,6 @@ __all__ = [
     "set_silicon",
     "silicon_parameters",
 ]
-
-RegionClass = Literal["silicon", "oxide"]
-
-#: Material names (as in gdsfactory layer stacks and :class:`~gplugins.devsim.stack1d.Layer1D`)
-#: solved as silicon and as oxide.
-SILICON_MATERIALS = frozenset({"silicon", "si", "Si", "poly", "polysilicon", "poly_si"})
-OXIDE_MATERIALS = frozenset({"oxide", "sio2", "SiO2", "Oxide", "gate_oxide"})
 
 #: DEVSIM ``simple_physics.py``'s values (eps_0, eps_si, q, k, n_i at 300 K, mu_n, mu_p, tau),
 #: as a :class:`Constants`. **Only** for the deprecated gplugins v0.8.0 path of
@@ -76,15 +76,6 @@ SIMPLE_PHYSICS_V080 = Constants(
     tau_n_s=1e-5,
     tau_p_s=1e-5,
 )
-
-
-def material_class(material: str | None) -> RegionClass | None:
-    """``"silicon"``, ``"oxide"`` or ``None`` for a material name."""
-    if material in SILICON_MATERIALS:
-        return "silicon"
-    if material in OXIDE_MATERIALS:
-        return "oxide"
-    return None
 
 
 def silicon_parameters(constants: Constants) -> dict[str, float]:
