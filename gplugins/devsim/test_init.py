@@ -13,11 +13,35 @@ import sys
 import pytest
 
 
+def _ours(name: str) -> bool:
+    return name == "gplugins.devsim" or name.startswith("gplugins.devsim.")
+
+
+@pytest.fixture(autouse=True)
+def _drop_reimported_modules():
+    """After each test, drop the gplugins.devsim modules the test imported afresh.
+
+    The package is lazy, so ``import gplugins.devsim`` succeeds even with devsim missing and
+    imports new module objects; monkeypatch restores the old entries it deleted, and this
+    removes the ones that did not exist before, so later tests see one set of classes.
+    """
+    before = {m for m in sys.modules if _ours(m)}
+    yield
+    for name in [m for m in sys.modules if _ours(m) and m not in before]:
+        del sys.modules[name]
+
+
 def _forget_gplugins_devsim(monkeypatch) -> None:
-    """Make the next ``import gplugins.devsim`` run again; undone after the test."""
-    for name in [
-        m for m in sys.modules if m == "gplugins.devsim" or m.startswith("gplugins.devsim.")
-    ]:
+    """Make the next ``import gplugins.devsim`` run again; undone after the test.
+
+    Importing a submodule rebinds ``gplugins.devsim`` (the attribute of the ``gplugins``
+    package) to the new package object, so that attribute is restored too.
+    """
+    import gplugins
+
+    if hasattr(gplugins, "devsim"):
+        monkeypatch.setattr(gplugins, "devsim", gplugins.devsim)
+    for name in [m for m in sys.modules if _ours(m)]:
         monkeypatch.delitem(sys.modules, name)
 
 

@@ -242,6 +242,7 @@ def test_stack1d_nodes_are_graded_spacings() -> None:
         got = [b - a for a, b in itertools.pairwise(inside)]
         # Positions are accumulated, so a difference of neighbours carries the rounding
         # of the position (~eps * x), relative to a spacing up to x/h larger (x/h <= 1e4).
+        # Measured in the TCAD image at c20f9ca: max 2.19e-12 (so rel 1e-12 failed).
         dev = max(abs(g / w - 1) for g, w in zip(got, want))
         worst = max(worst, dev)
         assert got == pytest.approx(want, rel=1e-9, abs=0)
