@@ -16,7 +16,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-__all__ = ["CVConvergenceError", "CVResult", "ConvergenceError", "PointInfo", "RoundoffPoint"]
+__all__ = [
+    "CVConvergenceError",
+    "CVResult",
+    "ConvergenceError",
+    "PointInfo",
+    "RoundoffPoint",
+]
 
 
 class ConvergenceError(RuntimeError):
@@ -30,7 +36,6 @@ class ConvergenceError(RuntimeError):
         """``message`` and DEVSIM's solve ``info`` (or None)."""
         super().__init__(message)
         self.info = info
-
 
 
 @dataclass(frozen=True)
@@ -104,12 +109,17 @@ class CVConvergenceError(ConvergenceError):
     """
 
     def __init__(
-        self, points: Sequence[float], reasons: Sequence[tuple[int, float, str]] | None = None
+        self,
+        points: Sequence[float],
+        reasons: Sequence[tuple[int, float, str]] | None = None,
     ) -> None:
         """The failed gate voltages ``points`` and their ``(index, vg, reason)``."""
         self.points = [float(v) for v in points]
         self.reasons = [(int(i), float(v), str(r)) for i, v, r in (reasons or ())]
-        detail = "; ".join(f"vg[{i}]={v!r}: {r}" for i, v, r in self.reasons) or repr(self.points)
+        detail = "; ".join(f"vg[{i}]={v!r}: {r}" for i, v, r in self.reasons) or repr(
+            self.points
+        )
         super().__init__(
-            f"C-V sweep: {len(self.points)} bias point(s) did not converge: {detail}", None
+            f"C-V sweep: {len(self.points)} bias point(s) did not converge: {detail}",
+            None,
         )

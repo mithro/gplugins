@@ -82,13 +82,13 @@ if TYPE_CHECKING:
 
 __all__ = [
     "OXIDE_MATERIALS",
-    "Backend",
-    "Device",
     "SILICON_MATERIALS",
+    "Backend",
     "CVSweep",
     "Contact",
     "ContactKind",
     "CrossSection2D",
+    "Device",
     "InterfaceKind",
     "InterfaceRef",
     "Layer1D",
@@ -143,7 +143,9 @@ class LayerRef:
         """Validate (and normalise) the fields; raise ValueError/TypeError if invalid."""
         layer = tuple(self.layer)
         if len(layer) != 2 or not all(isinstance(v, int) for v in layer):
-            raise ValueError(f"LayerRef.layer must be (layer, datatype) ints, got {self.layer!r}")
+            raise ValueError(
+                f"LayerRef.layer must be (layer, datatype) ints, got {self.layer!r}"
+            )
         object.__setattr__(self, "layer", layer)
 
 
@@ -159,7 +161,9 @@ class InterfaceRef:
         if not isinstance(self.a, str) or not self.a:
             raise ValueError(f"InterfaceRef.a must be a region name, got {self.a!r}")
         if self.b is not None and (not isinstance(self.b, str) or not self.b):
-            raise ValueError(f"InterfaceRef.b must be a region name or None, got {self.b!r}")
+            raise ValueError(
+                f"InterfaceRef.b must be a region name or None, got {self.b!r}"
+            )
 
     @property
     def gmsh_names(self) -> tuple[str, ...]:
@@ -182,7 +186,9 @@ class Contact:
     def __post_init__(self) -> None:
         """Validate (and normalise) the fields; raise ValueError/TypeError if invalid."""
         if not isinstance(self.name, str) or not self.name:
-            raise ValueError(f"Contact.name must be a non-empty string, got {self.name!r}")
+            raise ValueError(
+                f"Contact.name must be a non-empty string, got {self.name!r}"
+            )
         if not isinstance(self.location, LayerRef | InterfaceRef):
             raise TypeError(
                 f"Contact.location must be a LayerRef or InterfaceRef, got {self.location!r}"
@@ -205,7 +211,9 @@ def interface_kind(class0: str | None, class1: str | None) -> InterfaceKind | No
     return "potential"
 
 
-def check_contact_region(contact: Contact, region: str, region_class: str | None) -> None:
+def check_contact_region(
+    contact: Contact, region: str, region_class: str | None
+) -> None:
     """Raise unless ``contact``'s kind fits the class of the region it is placed on."""
     want = {"ohmic": "silicon", "gate": "oxide"}[contact.kind]
     if region_class != want:
@@ -246,11 +254,15 @@ class CVSweep:
         """Validate (and normalise) the fields; raise ValueError/TypeError if invalid."""
         object.__setattr__(self, "vg", tuple(float(v) for v in self.vg))
         if self.method not in ("qs", "ac"):
-            raise ValueError(f"CVSweep.method must be 'qs' or 'ac', got {self.method!r}")
+            raise ValueError(
+                f"CVSweep.method must be 'qs' or 'ac', got {self.method!r}"
+            )
         if not self.vg:
             raise ValueError("CVSweep.vg must not be empty")
         if self.method == "ac" and not (self.freq_hz is not None and self.freq_hz > 0):
-            raise ValueError(f"CVSweep method 'ac' needs freq_hz > 0, got {self.freq_hz!r}")
+            raise ValueError(
+                f"CVSweep method 'ac' needs freq_hz > 0, got {self.freq_hz!r}"
+            )
 
 
 # --------------------------------------------------------------------------------------------
@@ -274,12 +286,18 @@ class Layer1D:
     def __post_init__(self) -> None:
         """Validate (and normalise) the fields; raise ValueError/TypeError if invalid."""
         if not isinstance(self.name, str) or not self.name or "___" in self.name:
-            raise ValueError(f"Layer1D.name must be a non-empty name without '___': {self.name!r}")
+            raise ValueError(
+                f"Layer1D.name must be a non-empty name without '___': {self.name!r}"
+            )
         if self.material not in ("silicon", "oxide"):
-            raise ValueError(f"layer {self.name!r}: material must be 'silicon' or 'oxide'")
+            raise ValueError(
+                f"layer {self.name!r}: material must be 'silicon' or 'oxide'"
+            )
         if not (self.thickness_um > 0 and math.isfinite(self.thickness_um)):
             raise ValueError(f"layer {self.name!r}: thickness_um must be > 0")
-        if self.material == "oxide" and (self.doping is not None or self.dopant is not None):
+        if self.material == "oxide" and (
+            self.doping is not None or self.dopant is not None
+        ):
             raise ValueError(f"oxide layer {self.name!r} cannot have doping")
         if self.material == "silicon":
             if not isinstance(self.doping, DopingProfile):
@@ -311,7 +329,9 @@ class Mesh1D:
         for name, pair in dict(self.spacing_um).items():
             h0, h1 = (float(v) for v in pair)
             if not (h0 > 0 and h1 > 0 and math.isfinite(h0) and math.isfinite(h1)):
-                raise ValueError(f"Mesh1D spacing of {name!r} must be > 0, got {pair!r}")
+                raise ValueError(
+                    f"Mesh1D spacing of {name!r} must be > 0, got {pair!r}"
+                )
             spacing[name] = (h0, h1)
         object.__setattr__(self, "spacing_um", spacing)
 
@@ -378,7 +398,9 @@ def check_1d_contacts(
         check_contact_region(contact, loc.a, layers[index].material)
         out[contact.name] = ends[loc.a]
     if len(set(out.values())) != 2:
-        raise ValueError("the two contacts must be at the two different ends of the stack")
+        raise ValueError(
+            "the two contacts must be at the two different ends of the stack"
+        )
     return out
 
 
@@ -448,7 +470,9 @@ class Stack1D:
         layers, mesh = self.layers, self.mesh
         bounds = self.boundaries_um()
         spacings = [
-            graded_spacings(layer.thickness_um, *mesh.spacing_um[layer.name], mesh.max_ratio)
+            graded_spacings(
+                layer.thickness_um, *mesh.spacing_um[layer.name], mesh.max_ratio
+            )
             for layer in layers
         ]
         for i in range(1, len(layers)):
