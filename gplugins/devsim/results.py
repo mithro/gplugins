@@ -58,8 +58,14 @@ class PointInfo:
 class RoundoffPoint:
     """A QS solve accepted by ``roundoff_accept`` (see the module notes).
 
-    ``index`` is the grid point and ``vg`` the gate bias solved (``vg[index] -+ dv_qs``);
-    ``rel_error``/``abs_error`` the last iteration's largest relative error and potential
+    ``index`` is the grid point being solved or approached. ``vg`` is the gate bias applied to the
+    accepted solve. That is ``vg[index] -+ dv_qs`` when the solve is one of the point's own two
+    solves, but it is the ramp step's gate bias when the solve is a step of the ramp towards the
+    point (steps of at most 0.1 V, ``MAX_STEP_V``), which is not a grid point. A caller that
+    solves at a shifted bias (for example ``vg - dv_fb``) gets the shifted value back and adds
+    the shift itself.
+
+    ``rel_error``/``abs_error`` are the last iteration's largest relative error and potential
     update; ``max_abs_psi`` the device's max|psi| and ``roundoff_bound`` = ROUNDOFF_K * eps *
     max_abs_psi; ``region`` the region with the largest relative error, ``psi_bound`` the |psi|
     below which a node there must lie to violate rel_tol and ``min_abs_psi`` the smallest |psi|
