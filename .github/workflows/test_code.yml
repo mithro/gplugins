@@ -120,7 +120,7 @@ jobs:
     # gplugins.devsim.backends.charon runs Charon 2.2 inside the pinned gf180-tcad Charon image
     # (the dev-HEAD TCAD image plus Charon and netCDF4), with the same `docker run` settings as
     # test_devsim. The digest is gf180-tcad's docker/CHARON_IMAGE at gf180-tcad commit
-    # 4e1446518be3d1a6d1af3cb75bbe0f8193b84ab1. The image sets OMPI_MCA_ess_singleton_isolated=1,
+    # 8cf8dd322fa5f99098c03c34a6dc332fb3c4395d. The image sets OMPI_MCA_ess_singleton_isolated=1,
     # so charon_mp.exe runs as one process without mpirun.
     runs-on: ubuntu-latest
     name: Test the Charon backend (gf180-tcad Charon image)
