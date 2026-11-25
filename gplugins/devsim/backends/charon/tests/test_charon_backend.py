@@ -120,14 +120,14 @@ def test_deck_constants_match_description():
     stack = nfet_stack()
     c = stack.constants
     d = _deck(stack)
-    nums = lambda pat: [float(v) for v in re.findall(pat, d)]  # noqa: E731
+    nums = lambda pat: [float(v) for v in re.findall(pat, d, re.M)]  # noqa: E731
     assert nums(r"relative permittivity = (\S+)") == [c.eps_si, c.eps_ox, c.eps_si]
     assert nums(r"lattice temperature = (\S+)") == [c.t_k]
     assert nums(r"constant intrinsic concentration = (\S+)") == [c.n_i_cm3] * 2
     assert re.findall(r"fixed mobility for electrons is (\S+) holes is (\S+)", d) == [
         (repr(c.mu_n_cm2_per_vs), repr(c.mu_p_cm2_per_vs))] * 2
     assert nums(r"lifetime is constant = (\S+)") == [deck_mod.SRH_LIFETIME_S] * 4
-    assert nums(r"concentration = (\S+)\n") == [NGATE, N_CH]
+    assert nums(r"^ +concentration = (\S+)$") == [NGATE, N_CH]  # the doping blocks only
     assert re.findall(r"type is (\w+)", d) == ["donor", "acceptor"]
     assert "BC is ohmic for gate on gate_poly fixed at 0.0" in d
     assert "BC is ohmic for body_contact on body fixed at 0.0" in d
