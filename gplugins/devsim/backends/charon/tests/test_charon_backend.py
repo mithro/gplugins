@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: MIT
 """The Charon backend (gplugins.devsim.backends.charon).
 
-Host tests need numpy and netCDF4 (meshio for the read-back). The tests marked ``charon`` run
-Charon itself; they need the gf180-tcad Charon image (``charon_mp.exe`` under
-``CHARON_EXECUTABLE_PATH``) and are skipped elsewhere.
+They need numpy and netCDF4, and the tests that run Charon need ``charon_mp.exe`` under
+``CHARON_EXECUTABLE_PATH``: the gf180-tcad Charon image has both (the ``test_charon`` job of
+``.github/workflows/test_code.yml``). The image also has DEVSIM, so the two backends are compared
+on one stack (:func:`test_qs_equals_devsim_1d`). gf180-tcad checks the Exodus file with meshio and
+the C-V against its exact Poisson-Boltzmann reference.
 """
 
 from __future__ import annotations
@@ -101,16 +103,6 @@ def test_exodus_refuses_side_set_named_like_a_block(tmp_path):
                       (exodus.SideSet("body", (1,), (4,)),))  # fmt: skip
     with pytest.raises(ValueError, match="named like element blocks"):
         exodus.write_exodus(bad, tmp_path / "m.exo")
-
-
-def test_exodus_reads_back_with_meshio(tmp_path):
-    meshio = pytest.importorskip("meshio")
-    stack = nfet_stack()
-    mesh = exodus.strip_of(stack)
-    exodus.write_exodus(mesh, tmp_path / "m.exo")
-    m = meshio.read(tmp_path / "m.exo")
-    assert np.array_equal(m.points[:, :2], mesh.xy_um)
-    assert [len(c.data) for c in m.cells] == [len(b.connectivity) for b in mesh.blocks]
 
 
 # --- the deck ------------------------------------------------------------------------------
@@ -251,7 +243,59 @@ def test_two_runs_byte_identical(tmp_path):
 
 
 @needs_charon
-def test_single_rank_no_mpirun():
-    assert shutil.which("mpirun") is None or True  # the runner never calls it (see run.py)
-    src = Path(charon.run.__file__).read_text()
-    assert "mpirun" not in src.replace("without ``mpirun``", "")
+def test_qs_equals_devsim_1d(tmp_path):
+    """Charon and DEVSIM on the identical 1D stack: C within 1 % at every bias."""
+    from gplugins.devsim import sweep_cv
+    from gplugins.devsim.stack1d import create_1d_stack
+
+    stack = coarse_stack()
+    vg = tuple(np.round(np.arange(-2.0, 2.0001, 0.25), 12))
+    res = _sweep(stack, vg, tmp_path)
+    dd = create_1d_stack("xcheck", list(stack.layers), list(stack.contacts), stack.mesh,
+                         stack.constants, relative_error=1e-10)  # fmt: skip
+    try:
+        ref = sweep_cv(dd, "gate", vg, method="qs", dv_qs=1e-3, rel_tol=1e-10, abs_tol=1e-12,
+                       max_iterations=50)  # fmt: skip
+    finally:
+        dd.delete_device()
+    rel = np.abs(np.asarray(res.cgg) / np.asarray(ref.cgg) - 1)
+    assert np.max(rel) < 0.01, rel
+
+
+@needs_charon
+def test_single_rank_single_thread(tmp_path):
+    """charon_mp.exe runs as one process (no mpirun, no orted) with at most two threads: the
+    solve and OpenMPI's progress thread (as gf180-tcad's image test counts them)."""
+    import threading
+    import time
+
+    stack = coarse_stack()
+    seen = {"procs": set(), "threads": 0}
+    stop = threading.Event()
+
+    def sample():
+        while not stop.is_set():
+            for pid in os.listdir("/proc"):
+                if not pid.isdigit():
+                    continue
+                try:
+                    status = Path(f"/proc/{pid}/status").read_text()
+                except OSError:
+                    continue
+                name = re.search(r"Name:\s*(\S+)", status).group(1)
+                if name.startswith(("charon", "orted", "mpirun")):
+                    seen["procs"].add(name)
+                    if name.startswith("charon"):
+                        n = int(re.search(r"Threads:\s*(\d+)", status).group(1))
+                        seen["threads"] = max(seen["threads"], n)
+            time.sleep(0.05)
+
+    t = threading.Thread(target=sample)
+    t.start()
+    try:
+        charon.create_1d_device(stack, workdir=tmp_path)
+    finally:
+        stop.set()
+        t.join()
+    assert seen["procs"] and all(p.startswith("charon") for p in seen["procs"]), seen
+    assert 1 <= seen["threads"] <= 2, seen
