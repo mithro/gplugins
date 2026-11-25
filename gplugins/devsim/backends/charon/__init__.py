@@ -16,12 +16,18 @@ Task B). It imports only the neutral layer, never DEVSIM, meshwell or gmsh, and 
 - :func:`create_1d_device`: the equilibrium state at 0 V on every contact;
 - :func:`run_cv_sweep` (``method="qs"``): two LOCA sweeps of the gate at ``vg - dv_qs`` and
   ``vg + dv_qs`` over the whole grid, each a ramp from equilibrium to its first bias and then
-  :data:`SUBSTEPS` fixed steps per grid step; C is the central difference of the oxide-flux gate
-  charge (:mod:`.parse`), in F/cm^2, the DEVSIM backend's definition and unit. The grid must be
+  fixed steps of at most :data:`LOCA_STEP_V` (:func:`substeps_for`); C is the central
+  difference of the oxide-flux gate charge (:mod:`.parse`), in F/cm^2, the DEVSIM backend's definition and unit. The grid must be
   uniform. A failed LOCA step fails the sweep with :class:`CVConvergenceError`; nothing is
   retried at another tolerance;
-- the SRH lifetimes of the deck are :data:`.deck.SRH_LIFETIME_S`, not the description's (see
-  :mod:`.deck`); the zero-current result does not depend on them.
+- the SRH lifetimes of these quasi-static decks are :data:`.deck.SRH_LIFETIME_S`, not the
+  description's (see :mod:`.deck`); the zero-current result does not depend on them. An AC deck
+  would use the description's;
+- the charge checks of experiment B6 run on every sweep (:data:`FLUX_SPREAD_MAX`,
+  :data:`CHARGE_MISMATCH_MAX`) and are kept in :attr:`CharonDevice.checks`;
+- the gate is the contact at the stack's first end (x = 0): the gate charge is the oxide flux at
+  that face. ``vg`` is the bias Charon solves at: a flat-band shift such as gf180-tcad's
+  ``dv_fb_v`` is applied by the caller, as for the DEVSIM backend.
 
 ``PointInfo`` of a point: ``iterations`` the Newton iterations of the two LOCA steps that
 landed on ``vg -+ dv_qs``; ``rel_error`` the larger WRMS norm of the two (NOX's weighted RMS of
@@ -49,6 +55,7 @@ from gplugins.devsim.backends.charon.deck import (
     Sweep,
     Tolerances,
     check_comparable,
+    check_gate,
     write_deck,
 )
 from gplugins.devsim.backends.charon.exodus import Mesh, strip_of, write_exodus
@@ -58,6 +65,7 @@ from gplugins.devsim.backends.charon.parse import (
     grid_states,
     read_currents,
     read_states,
+    space_charge,
 )
 from gplugins.devsim.backends.charon.run import (
     CharonError,
@@ -69,21 +77,45 @@ from gplugins.devsim.device_description import CrossSection2D, CVSweep, Stack1D
 from gplugins.devsim.results import CVConvergenceError, CVResult, PointInfo
 
 __all__ = [
+    "CHARGE_MISMATCH_MAX",
+    "FLUX_SPREAD_MAX",
+    "LOCA_STEP_V",
     "SRH_LIFETIME_S",
-    "SUBSTEPS",
+    "ChargeCheckError",
     "CharonDevice",
     "CharonExe",
     "NotComparable",
     "Tolerances",
     "create_1d_device",
     "create_2d_device",
+    "gate_charge",
+    "read_states",
     "run_cv",
     "run_cv_sweep",
+    "substeps_for",
+    "write_deck",
+    "write_exodus",
 ]
 
-#: LOCA steps per grid step: one step per grid point stops near the onset of inversion on one
-#: of the two sweeps (experiment B2), five pass the whole range.
-SUBSTEPS = 5
+#: The largest LOCA step (V) of a C-V sweep: each grid step is cut into the fewest equal steps
+#: of at most this size. 10 mV (five steps per 50 mV grid step) passes the whole range on both
+#: devices (gf180-tcad experiment B2); 50 mV steps with the secant predictor stop in inversion
+#: (gf180-tcad Unit 3: the nfet at start values fails at 0.751 V).
+LOCA_STEP_V = 0.01
+
+
+def substeps_for(step: float) -> int:
+    """The LOCA steps per grid step of ``step`` (V): the fewest of at most :data:`LOCA_STEP_V`."""
+    return max(1, math.ceil(abs(step) / LOCA_STEP_V - 1e-9))
+
+
+#: The largest relative spread of the oxide flux over the oxide's intervals (B6: at most 1.4e-12
+#: on both devices); a larger one fails the sweep.
+FLUX_SPREAD_MAX = 1e-10
+
+#: The largest relative mismatch of the poly's space charge with the gate charge, and of the
+#: body's with minus the gate charge (B6: at most 8.2e-13); a larger one fails the sweep.
+CHARGE_MISMATCH_MAX = 1e-9
 
 #: The smallest LOCA step (V) of a ramp from equilibrium to a sweep's first bias.
 RAMP_MIN_STEP_V = 1e-4
@@ -93,6 +125,10 @@ RAMP_MAX_STEP_V = 0.05
 
 MESH_FILE = "strip.exo"
 EQUILIBRIUM = "equilibrium"
+
+
+class ChargeCheckError(RuntimeError):
+    """A sweep's charges fail the conservation checks of experiment B6."""
 
 
 @dataclass
@@ -105,6 +141,9 @@ class CharonDevice:
     exe: CharonExe = field(default_factory=CharonExe)
     tolerances: Tolerances = field(default_factory=Tolerances)
     owns_workdir: bool = False
+    #: The B6 checks of the last sweep: per side, the largest oxide-flux spread and the largest
+    #: poly and body charge mismatches (relative).
+    checks: dict = field(default_factory=dict)
 
     @property
     def equilibrium_file(self) -> str:
@@ -125,10 +164,12 @@ def create_1d_device(
 ) -> CharonDevice:
     """Write ``stack``'s strip and solve its equilibrium (0 V on every contact).
 
-    The files go to ``workdir`` (a new directory under the current one if None). Raises :class:`NotComparable` for a stack
-    the deck cannot write exactly, :class:`CharonError` if the solve fails.
+    The files go to ``workdir`` (a new directory under the current one if None). Raises
+    :class:`NotComparable` for a stack the deck cannot write exactly, :class:`CharonError` if
+    the solve fails.
     """
     check_comparable(stack)
+    gate = next(k for k, e in stack.contact_ends().items() if e == 0)
     owns = workdir is None
     wd = Path(tempfile.mkdtemp(prefix="charon_", dir=".")) if owns else Path(workdir)
     wd.mkdir(parents=True, exist_ok=True)
@@ -137,10 +178,9 @@ def create_1d_device(
     dev = CharonDevice(
         stack, wd, mesh, exe or CharonExe(), tolerances or Tolerances(), owns
     )
-    gate = stack.contacts[0].name
     deck = write_deck(stack, mesh_file=MESH_FILE, out_file=dev.equilibrium_file, gate=gate,
                       gate_bc="fixed at 0.0", problem="steady state", init="equilibrium",
-                      tolerances=dev.tolerances)  # fmt: skip
+                      tolerances=dev.tolerances, quasi_static=True)  # fmt: skip
     (wd / f"{EQUILIBRIUM}.inp").write_text(deck, encoding="utf-8")
     run_deck(f"{EQUILIBRIUM}.inp", cwd=wd, exe=dev.exe)
     return dev
@@ -168,7 +208,8 @@ def _sweep_side(
 ) -> tuple[np.ndarray, list]:
     """One LOCA sweep over ``vg``: a ramp from equilibrium to vg[0], then the sweep.
 
-    The sweep takes ``sub`` steps per grid step. Returns the gate charge (C/cm^2) at each grid point and its Newton steps.
+    The sweep takes ``sub`` steps per grid step. Returns the gate charge (C/cm^2) at each grid
+    point, its Newton steps and the B6 checks.
     """
     wd, stack = dev.workdir, dev.stack
     v0, v1 = float(vg[0]), float(vg[-1])
@@ -178,7 +219,7 @@ def _sweep_side(
         deck = write_deck(stack, mesh_file=dev.equilibrium_file, out_file=f"{name}_ramp.exo",
                           gate=gate, gate_bc=f"swept from 0.0 to {v0!r}",
                           problem="parameter sweep", init="exodus", sweep=ramp,
-                          tolerances=dev.tolerances)  # fmt: skip
+                          tolerances=dev.tolerances, quasi_static=True)  # fmt: skip
         (wd / f"{name}_ramp.inp").write_text(deck, encoding="utf-8")
         run_deck(f"{name}_ramp.inp", cwd=wd, exe=dev.exe)
         start = f"{name}_ramp.exo"
@@ -189,7 +230,7 @@ def _sweep_side(
     deck = write_deck(stack, mesh_file=start, out_file=f"{name}.exo", gate=gate,
                       gate_bc=f"swept from {v0!r} to {v1!r}", problem="parameter sweep",
                       init="exodus", sweep=sweep, tolerances=dev.tolerances,
-                      import_index=-1)  # fmt: skip
+                      import_index=-1, quasi_static=True)  # fmt: skip
     (wd / f"{name}.inp").write_text(deck, encoding="utf-8")
     log = run_deck(f"{name}.inp", cwd=wd, exe=dev.exe)
     head, rows = read_currents(wd / "currents-loca.dat")
@@ -198,53 +239,78 @@ def _sweep_side(
     idx = grid_states(rows[:, col], vg, sub)
     states = read_states(wd / f"{name}.exo")
     xs, bnodes = stack.node_positions_um()
-    ox = [i for i, layer in enumerate(stack.layers) if layer.material == "oxide"]
-    if len(ox) != 1:
-        raise NotComparable("the gate charge needs exactly one oxide layer")
-    i = ox[0]
+    i = next(k for k, layer in enumerate(stack.layers) if layer.material == "oxide")
     c = stack.constants
-    q, _spread = gate_charge(states, xs, (bnodes[i], bnodes[i + 1]), c.eps_ox,
-                             c.eps0_f_per_cm, idx)  # fmt: skip
+    q, spread = gate_charge(states, xs, (bnodes[i], bnodes[i + 1]), c.eps_ox,
+                            c.eps0_f_per_cm, idx)  # fmt: skip
+    scale = float(np.max(np.abs(q)))
+    mismatch = {}
+    for k, layer in enumerate(stack.layers):
+        if layer.material != "silicon":
+            continue
+        sign = 1.0 if layer.dopant == "donor" else -1.0
+        rho = space_charge(states, xs, (bnodes[k], bnodes[k + 1]), sign * layer.doping.conc,
+                           c.q_c, idx)  # fmt: skip
+        # the layer before the oxide holds the gate's charge, the one after its image
+        want = q if k < i else -q
+        mismatch[layer.name] = float(np.max(np.abs(rho - want)) / scale)
+    checks = {"oxide_flux_spread": float(np.max(spread)), "charge_mismatch": mismatch}
+    if (
+        checks["oxide_flux_spread"] > FLUX_SPREAD_MAX
+        or max(mismatch.values()) > CHARGE_MISMATCH_MAX
+    ):
+        raise ChargeCheckError(f"{name}: B6 charge checks failed: {checks}")
     steps = newton_steps(log.solver)
-    return q, [steps[k] if k < len(steps) else None for k in idx]
+    if len(steps) < idx[-1] + 1:
+        raise CharonError(
+            f"{name}: {len(steps)} Newton records for {idx[-1] + 1} states", log.solver
+        )
+    return q, [steps[k] for k in idx], checks
 
 
 def run_cv_sweep(
-    device: CharonDevice, sweep: CVSweep, *, substeps: int = SUBSTEPS
+    device: CharonDevice, sweep: CVSweep, *, substeps: int | None = None
 ) -> CVResult:
     """The quasi-static C-V of ``sweep`` on ``device`` (see the module notes).
 
-    The sign of the gate charge follows the gate: C > 0. Raises CVConvergenceError if a sweep fails.
+    ``substeps`` LOCA steps per grid step (default :func:`substeps_for`). The sign of the gate
+    charge follows the gate: C > 0. Raises CVConvergenceError if a sweep fails.
     """
     if sweep.method != "qs":
         raise NotImplementedError(
             "the Charon backend computes the quasi-static C-V only"
         )
-    if sweep.gate not in device.stack.contact_ends():
-        raise ValueError(f"gate {sweep.gate!r} is not a contact of the stack")
+    check_gate(device.stack, sweep.gate)
     vg = np.asarray(sweep.vg, dtype=float)
     step = _uniform_step(sweep.vg)
+    substeps = substeps or substeps_for(step)
     dv = float(sweep.dv_qs)
-    try:
-        q_lo, info_lo = _sweep_side(
-            device, sweep.gate, "sweep_minus", vg - dv, step, substeps
-        )
-        q_hi, info_hi = _sweep_side(
-            device, sweep.gate, "sweep_plus", vg + dv, step, substeps
-        )
-    except (CharonError, ValueError) as e:
-        raise CVConvergenceError(
-            list(sweep.vg), [(i, v, str(e)) for i, v in enumerate(sweep.vg)]
-        ) from e
-    cgg = central_difference(q_lo, q_hi, dv)
-    points = []
-    for a, b in zip(info_lo, info_hi, strict=True):
-        if a is None or b is None:
-            raise CVConvergenceError(
-                list(sweep.vg), [(-1, math.nan, "missing Newton record")]
+    sides = {}
+    for name, sgn in (("sweep_minus", -1.0), ("sweep_plus", 1.0)):
+        try:
+            sides[name] = _sweep_side(
+                device, sweep.gate, name, vg + sgn * dv, step, substeps
             )
-        points.append(PointInfo(True, a.iterations + b.iterations,
-                                max(a.wrms or 0.0, b.wrms or 0.0), math.nan))  # fmt: skip
+        except (CharonError, ValueError) as e:
+            # one entry: the sweep as a whole failed (LOCA gives up at its first failed step)
+            raise CVConvergenceError(
+                [float(vg[0])], [(0, float(vg[0]), f"{name}: {e}")]
+            ) from e
+    (q_lo, info_lo, chk_lo), (q_hi, info_hi, chk_hi) = (
+        sides["sweep_minus"],
+        sides["sweep_plus"],
+    )
+    device.checks = {"sweep_minus": chk_lo, "sweep_plus": chk_hi}
+    cgg = central_difference(q_lo, q_hi, dv)
+    points = [
+        PointInfo(
+            True,
+            a.iterations + b.iterations,
+            max(a.wrms or 0.0, b.wrms or 0.0),
+            math.nan,
+        )
+        for a, b in zip(info_lo, info_hi, strict=True)
+    ]
     return CVResult(vg=tuple(float(v) for v in vg), cgg=tuple(float(c) for c in cgg),
                     unit="F/cm^2", points=tuple(points), cgx={}, method="qs", freq_hz=None,
                     dv_qs=dv)  # fmt: skip

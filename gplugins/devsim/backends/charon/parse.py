@@ -132,6 +132,27 @@ def gate_charge(
     return q, spread
 
 
+def space_charge(
+    states: States, x_um, nodes: tuple[int, int], net_cm3: float, q_c: float, index
+) -> np.ndarray:
+    """Per state of ``index``: the space charge per area (C/cm^2) of one silicon layer.
+
+    The layer's 1D nodes are ``nodes`` (first, last) and its net doping ``net_cm3`` (N_D - N_A,
+    cm^-3); the charge is summed over the strip's control volumes (half of each neighbouring
+    interval, the CVFEM dual of a 1D mesh).
+    """
+    lo, hi = nodes
+    sel = np.asarray(index)
+    n = states.nodal["ELECTRON_DENSITY"][sel][:, 0::2][:, lo : hi + 1]
+    p = states.nodal["HOLE_DENSITY"][sel][:, 0::2][:, lo : hi + 1]
+    x = np.asarray(x_um, dtype=float)[lo : hi + 1] * 1e-4
+    h = np.diff(x)
+    vol = np.zeros(len(x))
+    vol[:-1] += h / 2
+    vol[1:] += h / 2
+    return (q_c * (p - n + net_cm3)) @ vol
+
+
 def central_difference(
     q_minus: np.ndarray, q_plus: np.ndarray, dv: float
 ) -> np.ndarray:
