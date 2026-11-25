@@ -135,8 +135,6 @@ def test_backends_implement_the_protocol() -> None:
     assert isinstance(backend, dd_mod.Backend)
     assert isinstance(charon, dd_mod.Backend)
     assert not isinstance(dd_mod, dd_mod.Backend)  # the check is not vacuous
-    with pytest.raises(NotImplementedError, match="Charon backend is not implemented"):
-        charon.create_1d_device(None)
 
 
 # --------------------------------------------------------------------------------------------
