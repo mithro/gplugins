@@ -8,8 +8,11 @@ temperature, the intrinsic density (``constant intrinsic concentration``), the c
 mobilities and the SRH recombination. Boltzmann statistics are Charon's default; the deck never
 enables Fermi-Dirac, band-gap narrowing or incomplete ionisation.
 
-**SRH lifetimes.** The deck writes :data:`SRH_LIFETIME_S` (1e-15 s), not the description's
-lifetimes. The quasi-static C-V solves the zero-current steady state, which is each region's
+**SRH lifetimes.** A quasi-static deck (``quasi_static=True``, the only kind the backend writes
+so far) has :data:`SRH_LIFETIME_S` (1e-15 s), not the description's lifetimes. Any other deck,
+an AC or harmonic-balance one in particular, has the description's: there the lifetime sets the
+minority-carrier response (tau_gen of about tau * N_A / n_i), so a short lifetime would turn a
+1 MHz curve into the low-frequency one. The quasi-static C-V solves the zero-current steady state, which is each region's
 equilibrium and does not depend on the lifetimes; with the description's lifetimes Charon's
 double-precision drift-diffusion Newton solve does not pass the onset of inversion, and with
 1e-14 s or shorter it does. The C of the two lifetimes differs by 1.1e-9 relative, the solver's
@@ -46,6 +49,14 @@ KLU2_LINES = (
     f'Direct input "{_STRATIMIKOS},Linear Solver Type,string,Amesos2"',
     f'Direct input "{_STRATIMIKOS},Preconditioner Type,string,None"',
     f'Direct input "{_STRATIMIKOS}->Linear Solver Types->Amesos2,Solver Type,string,KLU2"',
+)
+
+#: NOX's "Rescue Bad Newton Solve" is on by default: a Newton step then uses a linear solve that
+#: did not converge (gf180-tcad experiment B3). The deck turns it off, and
+#: :func:`gplugins.devsim.backends.charon.run.run_deck` fails a run whose log says it used one.
+NO_RESCUE_LINE = (
+    'Direct input "Charon->Solution Control->NOX->Direction->Newton,'
+    'Rescue Bad Newton Solve,bool,false"'
 )
 
 
@@ -116,8 +127,14 @@ def _uniform(layer) -> tuple[float, str]:
     return prof.conc, layer.dopant
 
 
-def material_block(name: str, layer, constants) -> list[str]:
-    """The material block of ``layer`` (silicon or oxide)."""
+def material_block(
+    name: str, layer, constants, *, lifetimes_s: tuple[float, float] | None = None
+) -> list[str]:
+    """The material block of ``layer`` (silicon or oxide).
+
+    ``lifetimes_s`` (electron, hole) default to the description's.
+    """
+    tau_n, tau_p = lifetimes_s or (constants.tau_n_s, constants.tau_p_s)
     c = constants
     if layer.material == "oxide":
         return [f"start Material Block {name}", "  material name is SiO2",
@@ -131,8 +148,8 @@ def material_block(name: str, layer, constants) -> list[str]:
         f"  constant intrinsic concentration = {c.n_i_cm3!r}",
         f"  fixed mobility for electrons is {c.mu_n_cm2_per_vs!r} holes is {c.mu_p_cm2_per_vs!r}",
         "  start Carrier Lifetime Block",
-        f"    electron lifetime is constant = {SRH_LIFETIME_S!r}",
-        f"    hole lifetime is constant = {SRH_LIFETIME_S!r}",
+        f"    electron lifetime is constant = {tau_n!r}",
+        f"    hole lifetime is constant = {tau_p!r}",
         "  end Carrier Lifetime Block",
         "  start uniform doping named Function1",
         f"    concentration = {conc!r}",
@@ -154,8 +171,12 @@ def write_deck(
     sweep: Sweep | None = None,
     tolerances: Tolerances = Tolerances(),
     import_index: int | None = None,
+    quasi_static: bool,
 ) -> str:
     """The interpreter deck of ``stack``.
+
+    ``quasi_static`` decks (zero-current steady states) get :data:`SRH_LIFETIME_S`; any other
+    deck the description's lifetimes (see the module notes).
 
     ``gate`` is held by ``gate_bc`` (``fixed at V`` or ``swept from A to B``), every other
     contact at 0 V; ``problem`` ``steady state`` or
@@ -196,7 +217,10 @@ def write_deck(
             lines.append("  SRH Recombination is on")
         lines.append(f"end Physics Block {layer.name}")
     for layer in stack.layers:
-        lines += material_block(f"{layer.name}Material", layer, c)
+        lifetimes = (SRH_LIFETIME_S, SRH_LIFETIME_S) if quasi_static else None
+        lines += material_block(
+            f"{layer.name}Material", layer, c, lifetimes_s=lifetimes
+        )
     for layer in stack.layers:
         dofs = (("ELECTRIC_POTENTIAL", "ELECTRON_DENSITY", "HOLE_DENSITY")
                 if layer.material == "silicon" else ("ELECTRIC_POTENTIAL",))  # fmt: skip
@@ -217,7 +241,7 @@ def write_deck(
         lines.append(f"BC is ohmic for {ss} on {region} {bc}")
     if sweep is not None:
         lines += sweep.lines()
-    lines += list(KLU2_LINES)
+    lines += [*KLU2_LINES, NO_RESCUE_LINE]
     t = tolerances
     lines += [
         "start solver block",
@@ -254,15 +278,36 @@ def check_comparable(stack) -> None:
             raise NotComparable(
                 f"contact {contact.name!r}: only ohmic contacts are written"
             )
+    oxides = [layer for layer in stack.layers if layer.material == "oxide"]
+    if len(oxides) != 1:
+        raise NotComparable(
+            f"the gate charge is the flux through one oxide layer; the stack has {len(oxides)}"
+        )
+
+
+def check_gate(stack, gate: str) -> None:
+    """Raise unless ``gate`` is the contact at the stack's first end (x = 0).
+
+    The gate charge is the oxide flux at the face of the layer that holds that contact.
+    """
+    ends = stack.contact_ends()
+    if gate not in ends:
+        raise ValueError(f"gate {gate!r} is not a contact of the stack: {sorted(ends)}")
+    if ends[gate] != 0:
+        raise NotComparable(
+            f"gate {gate!r} is at the stack's last end; the backend needs it at x = 0"
+        )
 
 
 __all__: Sequence[str] = (
     "KLU2_LINES",
+    "NO_RESCUE_LINE",
     "SRH_LIFETIME_S",
     "NotComparable",
     "Sweep",
     "Tolerances",
     "check_comparable",
+    "check_gate",
     "contact_regions",
     "material_block",
     "write_deck",

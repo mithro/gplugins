@@ -68,6 +68,7 @@ BC is ohmic for gate on gate_poly fixed at 0.0
 Direct input "Charon->Solution Control->NOX->Direction->Newton->Stratimikos Linear Solver->Stratimikos,Linear Solver Type,string,Amesos2"
 Direct input "Charon->Solution Control->NOX->Direction->Newton->Stratimikos Linear Solver->Stratimikos,Preconditioner Type,string,None"
 Direct input "Charon->Solution Control->NOX->Direction->Newton->Stratimikos Linear Solver->Stratimikos->Linear Solver Types->Amesos2,Solver Type,string,KLU2"
+Direct input "Charon->Solution Control->NOX->Direction->Newton,Rescue Bad Newton Solve,bool,false"
 start solver block
   start tpetra block
     problem type is steady state
