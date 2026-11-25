@@ -120,7 +120,7 @@ def test_exodus_refuses_side_set_named_like_a_block(tmp_path):
 def _deck(stack=None, **kw) -> str:
     stack = stack or nfet_stack()
     args = dict(mesh_file="m.exo", out_file="o.exo", gate="gate", gate_bc="fixed at 0.0",
-                problem="steady state", init="equilibrium")  # fmt: skip
+                problem="steady state", init="equilibrium", quasi_static=True)  # fmt: skip
     args.update(kw)
     return deck_mod.write_deck(stack, **args)
 
@@ -137,7 +137,7 @@ def test_deck_constants_match_description():
         re.findall(r"fixed mobility for electrons is (\S+) holes is (\S+)", d)
         == [(repr(c.mu_n_cm2_per_vs), repr(c.mu_p_cm2_per_vs))] * 2
     )
-    assert nums(r"lifetime is constant = (\S+)") == [deck_mod.SRH_LIFETIME_S] * 4
+    assert nums(r"lifetime is constant = (\S+)") == [1e-15] * 4  # a quasi-static deck
     assert nums(r"^ +concentration = (\S+)$") == [NGATE, N_CH]  # the doping blocks only
     assert re.findall(r"^ +type is (\w+)$", d, re.M) == ["donor", "acceptor"]
     assert "BC is ohmic for gate on gate_poly fixed at 0.0" in d
@@ -152,6 +152,70 @@ def test_deck_constants_match_description():
     assert d.count("uniform doping named Function1") == 4  # start and end, two blocks
     for line in deck_mod.KLU2_LINES:
         assert line in d
+    assert (
+        'Direct input "Charon->Solution Control->NOX->Direction->Newton,'
+        'Rescue Bad Newton Solve,bool,false"' in d
+    )
+
+
+def test_non_quasi_static_deck_keeps_the_description_lifetimes():
+    """Only quasi-static decks get the short lifetime: an AC deck needs the description's."""
+    d = _deck(quasi_static=False)
+    found = [float(v) for v in re.findall(r"lifetime is constant = (\S+)", d)]
+    assert found == [1e-5] * 4
+
+
+def test_gate_must_be_at_the_first_end():
+    stack = nfet_stack()
+    deck_mod.check_gate(stack, "gate")
+    with pytest.raises(deck_mod.NotComparable, match="last end"):
+        deck_mod.check_gate(stack, "body")
+    with pytest.raises(ValueError, match="not a contact"):
+        deck_mod.check_gate(stack, "drain")
+
+
+def test_one_oxide_layer_is_required():
+    layers = list(nfet_stack().layers)
+    layers.insert(2, Layer1D("oxide2", "oxide", 0.01, None))
+    stack = Stack1D("two_ox", layers, nfet_stack().contacts,
+                    Mesh1D({**SPACING, "oxide2": (5e-05, 5e-05)}, max_ratio=1.1))  # fmt: skip
+    with pytest.raises(deck_mod.NotComparable, match="one oxide layer"):
+        deck_mod.check_comparable(stack)
+
+
+def _fake_exe(tmp_path, solver_body: str) -> charon.CharonExe:
+    """A CharonExe whose interpreter writes the XML and whose solver is ``solver_body``."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "charonInterpreter.py").write_text(
+        "import sys\nopen(sys.argv[sys.argv.index('-i') + 1] + '.xml', 'w').write('x')\n"
+    )
+    solver = bin_dir / "charon_mp.exe"
+    solver.write_text("#!/bin/sh\n" + solver_body + "\n")
+    solver.chmod(0o755)
+    return charon.CharonExe(bin_dir=bin_dir, timeout_s=2)
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ("echo 'Charon run completed.'; exit 3", "exit 3"),
+        ("echo 'Linear solve failed - using the step anyway'; echo 'Charon run completed.'",
+         "unconverged linear solve"),
+        ("sleep 5", "timed out"),
+        ("echo nothing", "exit 0"),
+    ],
+)  # fmt: skip
+def test_run_deck_failures(tmp_path, monkeypatch, body, match):
+    """Each way a run can fail raises CharonError.
+
+    The ways: a non-zero exit, a rescued linear solve, a time-out, no completion line.
+    """
+    monkeypatch.delenv("CHARON_EXECUTABLE", raising=False)
+    exe = _fake_exe(tmp_path, body)
+    (tmp_path / "d.inp").write_text("x")
+    with pytest.raises(charon.run.CharonError, match=match):
+        charon.run.run_deck("d.inp", cwd=tmp_path, exe=exe)
 
 
 def test_not_comparable_profile():
@@ -192,6 +256,13 @@ def test_central_difference():
     )
 
 
+def test_substeps_for():
+    assert charon.substeps_for(0.05) == 5
+    assert charon.substeps_for(-0.05) == 5
+    assert charon.substeps_for(0.25) == 25
+    assert charon.substeps_for(0.005) == 1
+
+
 def test_grid_must_be_uniform():
     with pytest.raises(ValueError, match="uniform"):
         charon._uniform_step((0.0, 0.1, 0.3))
@@ -214,7 +285,7 @@ def test_doping_nodal_values(tmp_path):
     dev = charon.create_1d_device(stack, workdir=tmp_path)
     d = deck_mod.write_deck(stack, mesh_file=dev.equilibrium_file, out_file="dop.exo",
                             gate="gate", gate_bc="fixed at 0.0", problem="steady state",
-                            init="exodus")  # fmt: skip
+                            init="exodus", quasi_static=True)  # fmt: skip
     d = d.replace(
         "end output parameters",
         '  Output nodal variables in gate_poly for "Doping"\n'
@@ -242,7 +313,11 @@ def test_strip_width_independent(tmp_path, monkeypatch):
     monkeypatch.setattr(exodus, "STRIP_WIDTH_UM", 2.0)
     monkeypatch.setattr(exodus.strip_of, "__defaults__", (2.0,))
     b = _sweep(coarse_stack(), vg, tmp_path, "w2")
-    assert np.allclose(a.cgg, b.cgg, rtol=1e-9, atol=0)
+    rel = np.max(np.abs(np.asarray(b.cgg) / np.asarray(a.cgg) - 1))
+    # the Newton noise of the two independent solves (WRMS 1e-10) is about 1e-9 relative in C
+    # (gf180-tcad experiment B7), so equality to 1e-12 is not attainable; the strip width
+    # enters only through the side sets' length and cancels in the per-area flux
+    assert rel < 1e-8, rel
 
 
 @needs_charon
@@ -255,13 +330,21 @@ def test_qs_through_inversion(tmp_path):
     )
     c_ox = 3.9 * Constants().eps0_f_per_cm / (T_OX_NM * 1e-7)
     assert all(0 < c < c_ox for c in res.cgg)
+    # strong inversion (+2 V) and accumulation (-2 V) come back near C_ox, depletion dips
+    assert res.cgg[-1] > 0.9 * c_ox and res.cgg[0] > 0.9 * c_ox
+    assert min(res.cgg) < 0.6 * c_ox
 
 
 @needs_charon
 def test_two_runs_byte_identical(tmp_path):
     vg = (-0.5, 0.0, 0.5)
-    _sweep(coarse_stack(), vg, tmp_path, "a")
-    _sweep(coarse_stack(), vg, tmp_path, "b")
+    ra = _sweep(coarse_stack(), vg, tmp_path, "a")
+    rb = _sweep(coarse_stack(), vg, tmp_path, "b")
+    assert ra.cgg == rb.cgg
+    # abs_error is NaN (no potential update), and NaN != NaN
+    assert [(p.iterations, p.rel_error) for p in ra.points] == [
+        (p.iterations, p.rel_error) for p in rb.points
+    ]
     for name in ("sweep_minus.currents.dat", "sweep_plus.currents.dat"):
         assert (tmp_path / "a" / name).read_bytes() == (
             tmp_path / "b" / name
@@ -274,7 +357,7 @@ def test_qs_equals_devsim_1d(tmp_path):
     from gplugins.devsim import sweep_cv
     from gplugins.devsim.stack1d import create_1d_stack
 
-    stack = coarse_stack()
+    stack = nfet_stack()  # the committed DEVSIM job's mesh
     vg = tuple(np.round(np.arange(-2.0, 2.0001, 0.25), 12))
     res = _sweep(stack, vg, tmp_path)
     dd = create_1d_stack("xcheck", list(stack.layers), list(stack.contacts), stack.mesh,
@@ -285,7 +368,10 @@ def test_qs_equals_devsim_1d(tmp_path):
     finally:
         dd.delete_device()
     rel = np.abs(np.asarray(res.cgg) / np.asarray(ref.cgg) - 1)
-    assert np.max(rel) < 0.01, rel
+    # gf180-tcad measured at most 3.04e-5 (nfet) on this mesh over -5..5 V
+    # (results/charon-experiments/cv.json); the crossing voltages are compared in Task C,
+    # which defines their tolerance
+    assert np.max(rel) < 1e-4, rel
 
 
 @needs_charon
@@ -327,3 +413,36 @@ def test_single_rank_single_thread(tmp_path):
         t.join()
     assert seen["procs"] and all(p.startswith("charon") for p in seen["procs"]), seen
     assert 1 <= seen["threads"] <= 2, seen
+
+
+@needs_charon
+def test_charge_checks_b6(tmp_path):
+    """B6 runs on every sweep, and its checks are kept on the device.
+
+    The oxide flux is the same on every oxide interval, the poly holds the gate charge and the
+    body minus it.
+    """
+    stack = coarse_stack()
+    dev = charon.create_1d_device(stack, workdir=tmp_path)
+    charon.run_cv_sweep(dev, CVSweep("gate", (-1.0, 0.0, 1.0), "qs"))
+    for side in ("sweep_minus", "sweep_plus"):
+        chk = dev.checks[side]
+        assert chk["oxide_flux_spread"] < charon.FLUX_SPREAD_MAX, chk
+        assert set(chk["charge_mismatch"]) == {"gate_poly", "body"}
+        assert max(chk["charge_mismatch"].values()) < charon.CHARGE_MISMATCH_MAX, chk
+
+
+@needs_charon
+def test_strip_listed_by_io_info(tmp_path):
+    """SEACAS io_info lists the strip's blocks and side sets.
+
+    io_info is the image's Exodus lister; the image has no explore.
+    """
+    import subprocess
+
+    mesh = exodus.strip_of(nfet_stack())
+    exodus.write_exodus(mesh, tmp_path / "m.exo")
+    r = subprocess.run(["io_info", str(tmp_path / "m.exo")], capture_output=True, text=True,
+                       check=True)  # fmt: skip
+    for name in ("gate_poly", "oxide", "body", "gate", "body_contact"):
+        assert f"'{name}'" in r.stdout, name
