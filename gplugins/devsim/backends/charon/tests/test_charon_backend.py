@@ -139,7 +139,7 @@ def test_deck_constants_match_description():
     )
     assert nums(r"lifetime is constant = (\S+)") == [deck_mod.SRH_LIFETIME_S] * 4
     assert nums(r"^ +concentration = (\S+)$") == [NGATE, N_CH]  # the doping blocks only
-    assert re.findall(r"type is (\w+)", d) == ["donor", "acceptor"]
+    assert re.findall(r"^ +type is (\w+)$", d, re.M) == ["donor", "acceptor"]
     assert "BC is ohmic for gate on gate_poly fixed at 0.0" in d
     assert "BC is ohmic for body_contact on body fixed at 0.0" in d
     for absent in (
