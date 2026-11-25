@@ -19,6 +19,9 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+#: What NOX prints when it uses a linear solve that did not converge (Rescue Bad Newton Solve).
+RESCUED = "using the step anyway"
+
 
 class CharonError(RuntimeError):
     """A Charon run failed; ``log`` is its complete output."""
@@ -68,28 +71,51 @@ class StepInfo:
     wrms: float | None
 
 
+def _run(cmd: list[str], *, cwd: Path, timeout: float, what: str):
+    try:
+        return subprocess.run(
+            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except subprocess.TimeoutExpired as e:
+        out = (e.stdout or "") + (e.stderr or "")
+        log = out.decode(errors="replace") if isinstance(out, bytes) else out
+        raise CharonError(f"{what} timed out after {timeout} s", log) from e
+
+
 def run_deck(deck_file: str, *, cwd: Path, exe: CharonExe = CharonExe()) -> RunLog:
-    """Interpret and run ``deck_file`` in ``cwd``; raise :class:`CharonError` on failure."""
+    """Interpret and run ``deck_file`` in ``cwd``; raise :class:`CharonError` on failure.
+
+    A run fails on a non-zero exit, a log without ``Charon run completed.``, a time-out, or a
+    log in which NOX used an unconverged linear solve (:data:`RESCUED`).
+    """
     cwd = Path(cwd)
     (cwd / "currents-loca.dat").unlink(missing_ok=True)
-    r = subprocess.run([exe.python, "-W", "ignore", str(exe.interpreter), "-i", deck_file],
-                       cwd=cwd, capture_output=True, text=True, timeout=exe.timeout_s)  # fmt: skip
+    r = _run([exe.python, "-W", "ignore", str(exe.interpreter), "-i", deck_file], cwd=cwd,
+             timeout=exe.timeout_s, what=f"charonInterpreter.py on {deck_file}")  # fmt: skip
     interp = r.stdout + r.stderr
     if r.returncode != 0 or not (cwd / f"{deck_file}.xml").is_file():
         raise CharonError(
             f"charonInterpreter.py failed on {deck_file} ({r.returncode})", interp
         )
-    r = subprocess.run([str(exe.solver), f"--i={deck_file}.xml", "--current"], cwd=cwd,
-                       capture_output=True, text=True, timeout=exe.timeout_s)  # fmt: skip
+    r = _run([str(exe.solver), f"--i={deck_file}.xml", "--current"], cwd=cwd,
+             timeout=exe.timeout_s, what=f"charon_mp.exe on {deck_file}")  # fmt: skip
     log = r.stdout + r.stderr
     (cwd / f"{deck_file}.log").write_text(log, encoding="utf-8")
-    if "Charon run completed." not in log:
+    if r.returncode != 0 or "Charon run completed." not in log:
         fails = re.findall(
             r"Value of continuation parameter at failed step = (\S+)", log
         )
         raise CharonError(
             f"charon_mp.exe failed on {deck_file} (exit {r.returncode}"
-            + (f"; LOCA failed at {fails[0]} V" if fails else "") + ")", log)  # fmt: skip
+            + (f"; LOCA failed at {fails[0]} V" if fails else "")
+            + ")",
+            log,
+        )
+    if RESCUED in log:
+        raise CharonError(
+            f"charon_mp.exe used an unconverged linear solve on {deck_file} ({RESCUED!r})",
+            log,
+        )
     return RunLog(deck_file, interp, log)
 
 
