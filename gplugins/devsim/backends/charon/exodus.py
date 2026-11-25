@@ -103,7 +103,9 @@ def _chars(names, width: int = LEN_NAME) -> np.ndarray:
     return a
 
 
-def write_exodus(mesh: Mesh, path: Path | str, title: str = "gplugins.devsim charon") -> None:
+def write_exodus(
+    mesh: Mesh, path: Path | str, title: str = "gplugins.devsim charon"
+) -> None:
     """Write ``mesh`` as an Exodus II file (netCDF 64-bit offset, 8-byte floats)."""
     import netCDF4
 
@@ -130,12 +132,16 @@ def write_exodus(mesh: Mesh, path: Path | str, title: str = "gplugins.devsim cha
         ds.createVariable("time_whole", "f8", ("time_step",))
         ds.createVariable("coordx", "f8", ("num_nodes",))[:] = xy[:, 0]
         ds.createVariable("coordy", "f8", ("num_nodes",))[:] = xy[:, 1]
-        ds.createVariable("coor_names", "S1", ("num_dim", "len_name"))[:] = _chars(["x", "y"])
+        ds.createVariable("coor_names", "S1", ("num_dim", "len_name"))[:] = _chars(
+            ["x", "y"]
+        )
         ds.createVariable("eb_status", "i4", ("num_el_blk",))[:] = 1
         v = ds.createVariable("eb_prop1", "i4", ("num_el_blk",))
         v.setncattr("name", "ID")
         v[:] = np.arange(1, len(mesh.blocks) + 1)
-        ds.createVariable("eb_names", "S1", ("num_el_blk", "len_name"))[:] = _chars(names)
+        ds.createVariable("eb_names", "S1", ("num_el_blk", "len_name"))[:] = _chars(
+            names
+        )
         for k, b in enumerate(mesh.blocks, 1):
             conn = np.asarray(b.connectivity, dtype=np.int64)
             ds.createDimension(f"num_el_in_blk{k}", conn.shape[0])
@@ -149,15 +155,19 @@ def write_exodus(mesh: Mesh, path: Path | str, title: str = "gplugins.devsim cha
             v = ds.createVariable("ss_prop1", "i4", ("num_side_sets",))
             v.setncattr("name", "ID")
             v[:] = np.arange(1, len(mesh.side_sets) + 1)
-            ds.createVariable("ss_names", "S1", ("num_side_sets", "len_name"))[:] = _chars(
-                [s.name for s in mesh.side_sets]
+            ds.createVariable("ss_names", "S1", ("num_side_sets", "len_name"))[:] = (
+                _chars([s.name for s in mesh.side_sets])
             )
             for k, s in enumerate(mesh.side_sets, 1):
                 ds.createDimension(f"num_side_ss{k}", len(s.elements))
-                ds.createVariable(f"elem_ss{k}", "i4", (f"num_side_ss{k}",))[:] = s.elements
-                ds.createVariable(f"side_ss{k}", "i4", (f"num_side_ss{k}",))[:] = s.sides
-        ds.createVariable("qa_records", "S1", ("num_qa_rec", "four", "len_string"))[0] = _chars(
-            ["gplugins", "devsim", "", ""], 33
-        )
+                ds.createVariable(f"elem_ss{k}", "i4", (f"num_side_ss{k}",))[:] = (
+                    s.elements
+                )
+                ds.createVariable(f"side_ss{k}", "i4", (f"num_side_ss{k}",))[:] = (
+                    s.sides
+                )
+        ds.createVariable("qa_records", "S1", ("num_qa_rec", "four", "len_string"))[
+            0
+        ] = _chars(["gplugins", "devsim", "", ""], 33)
     finally:
         ds.close()

@@ -59,7 +59,12 @@ from gplugins.devsim.backends.charon.parse import (
     read_currents,
     read_states,
 )
-from gplugins.devsim.backends.charon.run import CharonError, CharonExe, newton_steps, run_deck
+from gplugins.devsim.backends.charon.run import (
+    CharonError,
+    CharonExe,
+    newton_steps,
+    run_deck,
+)
 from gplugins.devsim.device_description import CrossSection2D, CVSweep, Stack1D
 from gplugins.devsim.results import CVConvergenceError, CVResult, PointInfo
 
@@ -118,16 +123,20 @@ def create_1d_device(
     exe: CharonExe | None = None,
     tolerances: Tolerances | None = None,
 ) -> CharonDevice:
-    """Write ``stack``'s strip and solve its equilibrium (0 V on every contact) in ``workdir``
-    (a new directory under the current one if None). Raises :class:`NotComparable` for a stack
-    the deck cannot write exactly, :class:`CharonError` if the solve fails."""
+    """Write ``stack``'s strip and solve its equilibrium (0 V on every contact).
+
+    The files go to ``workdir`` (a new directory under the current one if None). Raises :class:`NotComparable` for a stack
+    the deck cannot write exactly, :class:`CharonError` if the solve fails.
+    """
     check_comparable(stack)
     owns = workdir is None
     wd = Path(tempfile.mkdtemp(prefix="charon_", dir=".")) if owns else Path(workdir)
     wd.mkdir(parents=True, exist_ok=True)
     mesh = strip_of(stack)
     write_exodus(mesh, wd / MESH_FILE)
-    dev = CharonDevice(stack, wd, mesh, exe or CharonExe(), tolerances or Tolerances(), owns)
+    dev = CharonDevice(
+        stack, wd, mesh, exe or CharonExe(), tolerances or Tolerances(), owns
+    )
     gate = stack.contacts[0].name
     deck = write_deck(stack, mesh_file=MESH_FILE, out_file=dev.equilibrium_file, gate=gate,
                       gate_bc="fixed at 0.0", problem="steady state", init="equilibrium",
@@ -139,7 +148,9 @@ def create_1d_device(
 
 def create_2d_device(cross_section: CrossSection2D, **options: Any):
     """Not implemented: the 2D MOS capacitor description is Task E of the Charon plan."""
-    raise NotImplementedError("the Charon backend has no 2D device yet (Charon plan, Task E)")
+    raise NotImplementedError(
+        "the Charon backend has no 2D device yet (Charon plan, Task E)"
+    )
 
 
 def _uniform_step(vg: tuple[float, ...]) -> float:
@@ -152,10 +163,13 @@ def _uniform_step(vg: tuple[float, ...]) -> float:
     return step
 
 
-def _sweep_side(dev: CharonDevice, gate: str, name: str, vg: np.ndarray, step: float,
-                sub: int) -> tuple[np.ndarray, list]:
-    """One LOCA sweep over ``vg``: ramp from equilibrium to vg[0], then ``sub`` steps per grid
-    step. Returns the gate charge (C/cm^2) at each grid point and its Newton steps."""
+def _sweep_side(
+    dev: CharonDevice, gate: str, name: str, vg: np.ndarray, step: float, sub: int
+) -> tuple[np.ndarray, list]:
+    """One LOCA sweep over ``vg``: a ramp from equilibrium to vg[0], then the sweep.
+
+    The sweep takes ``sub`` steps per grid step. Returns the gate charge (C/cm^2) at each grid point and its Newton steps.
+    """
     wd, stack = dev.workdir, dev.stack
     v0, v1 = float(vg[0]), float(vg[-1])
     ramp = Sweep(min(abs(step), RAMP_MAX_STEP_V), 10**6, min_step=RAMP_MIN_STEP_V,
@@ -195,27 +209,40 @@ def _sweep_side(dev: CharonDevice, gate: str, name: str, vg: np.ndarray, step: f
     return q, [steps[k] if k < len(steps) else None for k in idx]
 
 
-def run_cv_sweep(device: CharonDevice, sweep: CVSweep, *, substeps: int = SUBSTEPS) -> CVResult:
-    """The quasi-static C-V of ``sweep`` on ``device`` (see the module notes). The sign of the
-    gate charge follows the gate: C > 0. Raises CVConvergenceError if a sweep fails."""
+def run_cv_sweep(
+    device: CharonDevice, sweep: CVSweep, *, substeps: int = SUBSTEPS
+) -> CVResult:
+    """The quasi-static C-V of ``sweep`` on ``device`` (see the module notes).
+
+    The sign of the gate charge follows the gate: C > 0. Raises CVConvergenceError if a sweep fails.
+    """
     if sweep.method != "qs":
-        raise NotImplementedError("the Charon backend computes the quasi-static C-V only")
+        raise NotImplementedError(
+            "the Charon backend computes the quasi-static C-V only"
+        )
     if sweep.gate not in device.stack.contact_ends():
         raise ValueError(f"gate {sweep.gate!r} is not a contact of the stack")
     vg = np.asarray(sweep.vg, dtype=float)
     step = _uniform_step(sweep.vg)
     dv = float(sweep.dv_qs)
     try:
-        q_lo, info_lo = _sweep_side(device, sweep.gate, "sweep_minus", vg - dv, step, substeps)
-        q_hi, info_hi = _sweep_side(device, sweep.gate, "sweep_plus", vg + dv, step, substeps)
+        q_lo, info_lo = _sweep_side(
+            device, sweep.gate, "sweep_minus", vg - dv, step, substeps
+        )
+        q_hi, info_hi = _sweep_side(
+            device, sweep.gate, "sweep_plus", vg + dv, step, substeps
+        )
     except (CharonError, ValueError) as e:
-        raise CVConvergenceError(list(sweep.vg),
-                                 [(i, v, str(e)) for i, v in enumerate(sweep.vg)]) from e
+        raise CVConvergenceError(
+            list(sweep.vg), [(i, v, str(e)) for i, v in enumerate(sweep.vg)]
+        ) from e
     cgg = central_difference(q_lo, q_hi, dv)
     points = []
     for a, b in zip(info_lo, info_hi, strict=True):
         if a is None or b is None:
-            raise CVConvergenceError(list(sweep.vg), [(-1, math.nan, "missing Newton record")])
+            raise CVConvergenceError(
+                list(sweep.vg), [(-1, math.nan, "missing Newton record")]
+            )
         points.append(PointInfo(True, a.iterations + b.iterations,
                                 max(a.wrms or 0.0, b.wrms or 0.0), math.nan))  # fmt: skip
     return CVResult(vg=tuple(float(v) for v in vg), cgg=tuple(float(c) for c in cgg),
@@ -223,8 +250,9 @@ def run_cv_sweep(device: CharonDevice, sweep: CVSweep, *, substeps: int = SUBSTE
                     dv_qs=dv)  # fmt: skip
 
 
-def run_cv(stack: Stack1D, sweep: CVSweep, *, workdir: Path | str,
-           exe: CharonExe | None = None) -> CVResult:
+def run_cv(
+    stack: Stack1D, sweep: CVSweep, *, workdir: Path | str, exe: CharonExe | None = None
+) -> CVResult:
     """:func:`create_1d_device` then :func:`run_cv_sweep` in ``workdir``."""
     dev = create_1d_device(stack, workdir=workdir, exe=exe)
     try:

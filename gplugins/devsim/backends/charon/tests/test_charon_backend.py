@@ -10,14 +10,15 @@ the C-V against its exact Poisson-Boltzmann reference.
 
 from __future__ import annotations
 
+import itertools
 import math
 import os
 import re
-import shutil
 from pathlib import Path
 
 import numpy as np
 import pytest
+
 from gplugins.devsim import doping
 from gplugins.devsim.backends import charon
 from gplugins.devsim.backends.charon import deck as deck_mod
@@ -34,8 +35,12 @@ from gplugins.devsim.device_description import (
 
 netCDF4 = pytest.importorskip("netCDF4")
 
-CHARON = Path(os.environ.get("CHARON_EXECUTABLE_PATH", "/opt/charon/bin")) / "charon_mp.exe"
-needs_charon = pytest.mark.skipif(not CHARON.is_file(), reason="needs Charon (the Charon image)")
+CHARON = (
+    Path(os.environ.get("CHARON_EXECUTABLE_PATH", "/opt/charon/bin")) / "charon_mp.exe"
+)
+needs_charon = pytest.mark.skipif(
+    not CHARON.is_file(), reason="needs Charon (the Charon image)"
+)
 
 # The nfet_05v0 1D stack of gf180-tcad at its calibrated values
 # (results/tcad/moscap1d/nfet_05v0/calibrated/per_area.meta.json).
@@ -74,15 +79,19 @@ def test_exodus_nodes_identical(tmp_path):
     ds = netCDF4.Dataset(tmp_path / "m.exo")
     ds.set_auto_mask(False)
     x, y = ds["coordx"][:], ds["coordy"][:]
-    assert np.array_equal(x[0::2], np.asarray(xs)) and np.array_equal(x[1::2], np.asarray(xs))
+    assert np.array_equal(x[0::2], np.asarray(xs)) and np.array_equal(
+        x[1::2], np.asarray(xs)
+    )
     assert np.all(y[0::2] == 0) and np.all(y[1::2] == exodus.STRIP_WIDTH_UM)
     assert ds.dimensions["num_elem"].size == len(xs) - 1
     names = ["".join(c.decode() for c in row if c) for row in ds["eb_names"][:]]
     assert names == [layer.name for layer in stack.layers]
-    for k, (lo, hi) in enumerate(zip(bnodes, bnodes[1:]), 1):
+    for k, (lo, hi) in enumerate(itertools.pairwise(bnodes), 1):
         conn = ds[f"connect{k}"][:] - 1
         js = np.arange(lo, hi)
-        assert np.array_equal(conn, np.column_stack([2 * js, 2 * js + 2, 2 * js + 3, 2 * js + 1]))
+        assert np.array_equal(
+            conn, np.column_stack([2 * js, 2 * js + 2, 2 * js + 3, 2 * js + 1])
+        )
     ss = ["".join(c.decode() for c in row if c) for row in ds["ss_names"][:]]
     assert ss == ["gate", "body_contact"]  # "body" is a block's name
     assert [int(ds["side_ss1"][0]), int(ds["side_ss2"][0])] == [4, 2]
@@ -124,14 +133,21 @@ def test_deck_constants_match_description():
     assert nums(r"relative permittivity = (\S+)") == [c.eps_si, c.eps_ox, c.eps_si]
     assert nums(r"lattice temperature = (\S+)") == [c.t_k]
     assert nums(r"constant intrinsic concentration = (\S+)") == [c.n_i_cm3] * 2
-    assert re.findall(r"fixed mobility for electrons is (\S+) holes is (\S+)", d) == [
-        (repr(c.mu_n_cm2_per_vs), repr(c.mu_p_cm2_per_vs))] * 2
+    assert (
+        re.findall(r"fixed mobility for electrons is (\S+) holes is (\S+)", d)
+        == [(repr(c.mu_n_cm2_per_vs), repr(c.mu_p_cm2_per_vs))] * 2
+    )
     assert nums(r"lifetime is constant = (\S+)") == [deck_mod.SRH_LIFETIME_S] * 4
     assert nums(r"^ +concentration = (\S+)$") == [NGATE, N_CH]  # the doping blocks only
     assert re.findall(r"type is (\w+)", d) == ["donor", "acceptor"]
     assert "BC is ohmic for gate on gate_poly fixed at 0.0" in d
     assert "BC is ohmic for body_contact on body fixed at 0.0" in d
-    for absent in ("Fermi", "band gap narrowing", "incomplete ionization", "work function"):
+    for absent in (
+        "Fermi",
+        "band gap narrowing",
+        "incomplete ionization",
+        "work function",
+    ):
         assert absent.lower() not in d.lower(), absent
     assert d.count("uniform doping named Function1") == 4  # start and end, two blocks
     for line in deck_mod.KLU2_LINES:
@@ -171,7 +187,9 @@ def test_sweep_grid_alignment():
 
 
 def test_central_difference():
-    assert np.allclose(parse.central_difference([1.0, 2.0], [3.0, 6.0], 0.5), [2.0, 4.0])
+    assert np.allclose(
+        parse.central_difference([1.0, 2.0], [3.0, 6.0], 0.5), [2.0, 4.0]
+    )
 
 
 def test_grid_must_be_uniform():
@@ -197,20 +215,24 @@ def test_doping_nodal_values(tmp_path):
     d = deck_mod.write_deck(stack, mesh_file=dev.equilibrium_file, out_file="dop.exo",
                             gate="gate", gate_bc="fixed at 0.0", problem="steady state",
                             init="exodus")  # fmt: skip
-    d = d.replace("end output parameters",
-                  '  Output nodal variables in gate_poly for "Doping"\n'
-                  '  Output nodal variables in body for "Doping"\nend output parameters')
+    d = d.replace(
+        "end output parameters",
+        '  Output nodal variables in gate_poly for "Doping"\n'
+        '  Output nodal variables in body for "Doping"\nend output parameters',
+    )
     (tmp_path / "dop.inp").write_text(d)
     log = charon.run.run_deck("dop.inp", cwd=tmp_path)
     c0 = float(re.search(r"Concentration Scaling C0 = (\S+)", log.solver).group(1))
     dop = parse.read_states(tmp_path / "dop.exo").nodal["Doping"][0, 0::2] * c0
-    xs, bn = stack.node_positions_um()
+    _xs, bn = stack.node_positions_um()
     assert np.allclose(dop[: bn[1] + 1], NGATE, rtol=1e-9, atol=0)
-    assert np.allclose(dop[bn[2]:], -N_CH, rtol=1e-9, atol=0)
+    assert np.allclose(dop[bn[2] :], -N_CH, rtol=1e-9, atol=0)
 
 
 def _sweep(stack, vg, tmp_path, name="cv"):
-    return charon.run_cv(stack, CVSweep("gate", tuple(vg), "qs"), workdir=tmp_path / name)
+    return charon.run_cv(
+        stack, CVSweep("gate", tuple(vg), "qs"), workdir=tmp_path / name
+    )
 
 
 @needs_charon
@@ -228,7 +250,9 @@ def test_qs_through_inversion(tmp_path):
     vg = np.round(np.arange(-2.0, 2.0001, 0.25), 12)
     res = _sweep(coarse_stack(), vg, tmp_path)
     assert res.unit == "F/cm^2" and len(res.cgg) == len(vg)
-    assert all(p.converged and p.iterations > 0 and math.isnan(p.abs_error) for p in res.points)
+    assert all(
+        p.converged and p.iterations > 0 and math.isnan(p.abs_error) for p in res.points
+    )
     c_ox = 3.9 * Constants().eps0_f_per_cm / (T_OX_NM * 1e-7)
     assert all(0 < c < c_ox for c in res.cgg)
 
@@ -239,7 +263,9 @@ def test_two_runs_byte_identical(tmp_path):
     _sweep(coarse_stack(), vg, tmp_path, "a")
     _sweep(coarse_stack(), vg, tmp_path, "b")
     for name in ("sweep_minus.currents.dat", "sweep_plus.currents.dat"):
-        assert (tmp_path / "a" / name).read_bytes() == (tmp_path / "b" / name).read_bytes()
+        assert (tmp_path / "a" / name).read_bytes() == (
+            tmp_path / "b" / name
+        ).read_bytes()
 
 
 @needs_charon
@@ -264,8 +290,10 @@ def test_qs_equals_devsim_1d(tmp_path):
 
 @needs_charon
 def test_single_rank_single_thread(tmp_path):
-    """charon_mp.exe runs as one process (no mpirun, no orted) with at most two threads: the
-    solve and OpenMPI's progress thread (as gf180-tcad's image test counts them)."""
+    """charon_mp.exe runs as one process (no mpirun, no orted), with at most two threads.
+
+    The two are the solve and OpenMPI's progress thread, as gf180-tcad's image test counts them.
+    """
     import threading
     import time
 

@@ -41,9 +41,7 @@ SRH_LIFETIME_S = 1e-15
 #: differences between semiconductor regions, and every region here is silicon.
 SILICON_AFFINITY_EV = 4.05
 
-_STRATIMIKOS = (
-    "Charon->Solution Control->NOX->Direction->Newton->Stratimikos Linear Solver->Stratimikos"
-)
+_STRATIMIKOS = "Charon->Solution Control->NOX->Direction->Newton->Stratimikos Linear Solver->Stratimikos"
 KLU2_LINES = (
     f'Direct input "{_STRATIMIKOS},Linear Solver Type,string,Amesos2"',
     f'Direct input "{_STRATIMIKOS},Preconditioner Type,string,None"',
@@ -55,6 +53,7 @@ class NotComparable(ValueError):
     """The description holds a model or profile Charon cannot express identically."""
 
     def __init__(self, reason: str) -> None:
+        """``reason``: what has no exact Charon form."""
         super().__init__(reason)
         self.reason = reason
 
@@ -86,11 +85,14 @@ class Sweep:
 
     def lines(self) -> list[str]:
         h = abs(self.step)
-        lines = ["start sweep options", f"  initial step size = {h!r}",
-                 f"  minimum step size = {abs(self.min_step or h)!r}",
-                 f"  maximum step size = {h!r}",
-                 f"  maximum number of steps = {self.max_steps}",
-                 f"  hit continuation bound = {'true' if self.hit_bound else 'false'}"]
+        lines = [
+            "start sweep options",
+            f"  initial step size = {h!r}",
+            f"  minimum step size = {abs(self.min_step or h)!r}",
+            f"  maximum step size = {h!r}",
+            f"  maximum number of steps = {self.max_steps}",
+            f"  hit continuation bound = {'true' if self.hit_bound else 'false'}",
+        ]
         if self.min_step is None:
             lines.append("  step size aggressiveness = 0.0")
         return [*lines, f"  predictor method is {self.predictor}", "end sweep options"]
@@ -98,13 +100,19 @@ class Sweep:
 
 def _uniform(layer) -> tuple[float, str]:
     prof = layer.doping
-    if not isinstance(prof, doping.Constant) or prof.ymin is not None or prof.ymax is not None:
+    if (
+        not isinstance(prof, doping.Constant)
+        or prof.ymin is not None
+        or prof.ymax is not None
+    ):
         raise NotComparable(
             f"doping profile of layer {layer.name!r} ({type(prof).__name__}) has no exact "
             "Charon form (only a Constant over the whole layer)"
         )
     if not prof.conc > 0:
-        raise NotComparable(f"layer {layer.name!r}: doping {prof.conc!r} is not positive")
+        raise NotComparable(
+            f"layer {layer.name!r}: doping {prof.conc!r} is not positive"
+        )
     return prof.conc, layer.dopant
 
 
@@ -147,12 +155,17 @@ def write_deck(
     tolerances: Tolerances = Tolerances(),
     import_index: int | None = None,
 ) -> str:
-    """The interpreter deck of ``stack``: ``gate`` held by ``gate_bc`` (``fixed at V`` or
-    ``swept from A to B``), every other contact at 0 V; ``problem`` ``steady state`` or
+    """The interpreter deck of ``stack``.
+
+    ``gate`` is held by ``gate_bc`` (``fixed at V`` or ``swept from A to B``), every other
+    contact at 0 V; ``problem`` ``steady state`` or
     ``parameter sweep``; ``init`` ``equilibrium`` (Charon's estimate) or ``exodus`` (the
-    imported state)."""
+    imported state).
+    """
     if problem not in ("steady state", "parameter sweep"):
-        raise ValueError(f"problem must be 'steady state' or 'parameter sweep', got {problem!r}")
+        raise ValueError(
+            f"problem must be 'steady state' or 'parameter sweep', got {problem!r}"
+        )
     if init not in ("equilibrium", "exodus"):
         raise ValueError(f"init must be 'equilibrium' or 'exodus', got {init!r}")
     if (problem == "parameter sweep") != (sweep is not None):
@@ -163,7 +176,8 @@ def write_deck(
     if gate not in ends:
         raise ValueError(f"gate {gate!r} is not a contact of the stack: {sorted(ends)}")
     lines = [
-        f"Import State File {mesh_file}" + (f" at Index {import_index}" if import_index else ""),
+        f"Import State File {mesh_file}"
+        + (f" at Index {import_index}" if import_index else ""),
         "tpetra is on",
         f"lattice temperature = {c.t_k!r}",
         "start output parameters",
@@ -172,7 +186,9 @@ def write_deck(
         "end output parameters",
     ]
     for layer in stack.layers:
-        disc = "drift diffusion cvfem" if layer.material == "silicon" else "laplace cvfem"
+        disc = (
+            "drift diffusion cvfem" if layer.material == "silicon" else "laplace cvfem"
+        )
         lines += [f"start Physics Block {layer.name}", f"  geometry block is {layer.name}",
                   f"  standard discretization type is {disc}",
                   f"  material model is {layer.name}Material"]  # fmt: skip
@@ -235,10 +251,19 @@ def check_comparable(stack) -> None:
             _uniform(layer)
     for contact in stack.contacts:
         if contact.kind != "ohmic":
-            raise NotComparable(f"contact {contact.name!r}: only ohmic contacts are written")
+            raise NotComparable(
+                f"contact {contact.name!r}: only ohmic contacts are written"
+            )
 
 
 __all__: Sequence[str] = (
-    "KLU2_LINES", "NotComparable", "SRH_LIFETIME_S", "Sweep", "Tolerances", "check_comparable",
-    "contact_regions", "material_block", "write_deck",
+    "KLU2_LINES",
+    "SRH_LIFETIME_S",
+    "NotComparable",
+    "Sweep",
+    "Tolerances",
+    "check_comparable",
+    "contact_regions",
+    "material_block",
+    "write_deck",
 )  # fmt: skip

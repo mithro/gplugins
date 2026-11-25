@@ -46,7 +46,11 @@ def read_states(path: Path | str) -> States:
     try:
         x = np.array(ds["coordx"][:])
         y = np.array(ds["coordy"][:])
-        times = np.array(ds["time_whole"][:]) if "time_whole" in ds.variables else np.zeros(0)
+        times = (
+            np.array(ds["time_whole"][:])
+            if "time_whole" in ds.variables
+            else np.zeros(0)
+        )
         nodal = {}
         if "name_nod_var" in ds.variables:
             for k, name in enumerate(_names(ds["name_nod_var"]), 1):
@@ -60,16 +64,20 @@ def read_currents(path: Path | str) -> tuple[list[str], np.ndarray]:
     """``currents-loca.dat``: its column names and rows."""
     lines = Path(path).read_text(encoding="utf-8").splitlines()
     head = lines[0].split()
-    rows = np.array([[float(v) for v in line.split()] for line in lines[1:] if line.strip()])
+    rows = np.array(
+        [[float(v) for v in line.split()] for line in lines[1:] if line.strip()]
+    )
     return head, rows.reshape(-1, len(head))
 
 
 def grid_states(voltages: np.ndarray, want: np.ndarray, sub: int) -> np.ndarray:
-    """The state indices of the grid ``want`` (V) in a sweep that took ``sub`` steps per grid
-    step: every ``sub``-th state, each within :data:`CURRENTS_RESOLUTION_V` of its grid value.
+    """The state indices of the grid ``want`` (V) in a sweep of ``sub`` steps per grid step.
+
+    They are every ``sub``-th state, each within :data:`CURRENTS_RESOLUTION_V` of its grid value.
     One extra state past the last grid point (LOCA's zero-length step onto the bound) is allowed
     when it sits on the last grid value; anything else raises ValueError (a cut or misaligned
-    sweep)."""
+    sweep).
+    """
     v = np.asarray(voltages, dtype=float)
     want = np.asarray(want, dtype=float)
     idx = np.arange(len(want)) * sub
@@ -79,9 +87,13 @@ def grid_states(voltages: np.ndarray, want: np.ndarray, sub: int) -> np.ndarray:
     if np.max(dev) > CURRENTS_RESOLUTION_V:
         k = int(np.argmax(dev))
         raise ValueError(f"state {idx[k]} at {v[idx[k]]!r} V, grid point {want[k]!r} V")
-    extra = v[idx[-1] + 1:]
-    if len(extra) > 1 or (len(extra) == 1 and abs(extra[0] - want[-1]) > CURRENTS_RESOLUTION_V):
-        raise ValueError(f"unexpected states after the last grid point: {extra.tolist()}")
+    extra = v[idx[-1] + 1 :]
+    if len(extra) > 1 or (
+        len(extra) == 1 and abs(extra[0] - want[-1]) > CURRENTS_RESOLUTION_V
+    ):
+        raise ValueError(
+            f"unexpected states after the last grid point: {extra.tolist()}"
+        )
     return idx
 
 
@@ -90,22 +102,38 @@ def strip_nodes(states: States) -> np.ndarray:
     return np.arange(0, len(states.x), 2)
 
 
-def gate_charge(states: States, x_um, oxide_nodes: tuple[int, int], eps_ox: float,
-                eps0_f_per_cm: float, index) -> tuple[np.ndarray, np.ndarray]:
-    """Per state of ``index``: the gate charge per area (C/cm^2), the oxide flux at the poly
-    face, and the largest relative spread of the flux over the oxide intervals.
+def gate_charge(
+    states: States,
+    x_um,
+    oxide_nodes: tuple[int, int],
+    eps_ox: float,
+    eps0_f_per_cm: float,
+    index,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per state of ``index``: the gate charge per area and the spread of the oxide flux.
+
+    The gate charge (C/cm^2) is the oxide flux at the poly face; the spread is the largest
+    relative difference of the flux over the oxide intervals.
 
     ``oxide_nodes`` are the 1D indices of the oxide's first and last node; ``x_um`` the 1D node
-    positions."""
+    positions.
+    """
     i0, i1 = oxide_nodes
     psi = states.nodal["ELECTRIC_POTENTIAL"][np.asarray(index)][:, 0::2]
     x = np.asarray(x_um, dtype=float) * 1e-4
-    flux = eps_ox * eps0_f_per_cm * (psi[:, i0:i1] - psi[:, i0 + 1:i1 + 1]) / np.diff(x[i0:i1 + 1])
+    flux = (
+        eps_ox
+        * eps0_f_per_cm
+        * (psi[:, i0:i1] - psi[:, i0 + 1 : i1 + 1])
+        / np.diff(x[i0 : i1 + 1])
+    )
     q = flux[:, 0]
     spread = np.max(np.abs(flux - q[:, None]), axis=1) / np.max(np.abs(q))
     return q, spread
 
 
-def central_difference(q_minus: np.ndarray, q_plus: np.ndarray, dv: float) -> np.ndarray:
+def central_difference(
+    q_minus: np.ndarray, q_plus: np.ndarray, dv: float
+) -> np.ndarray:
     """C = (Q(vg + dv) - Q(vg - dv)) / (2 dv), per unit of Q per V."""
     return (np.asarray(q_plus) - np.asarray(q_minus)) / (2 * dv)

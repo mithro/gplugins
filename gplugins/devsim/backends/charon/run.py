@@ -24,6 +24,7 @@ class CharonError(RuntimeError):
     """A Charon run failed; ``log`` is its complete output."""
 
     def __init__(self, message: str, log: str) -> None:
+        """``message`` and the run's complete output ``log``."""
         super().__init__(message)
         self.log = log
 
@@ -33,7 +34,9 @@ class CharonExe:
     """Where the interpreter and the solver are: ``CHARON_EXECUTABLE_PATH`` by default."""
 
     bin_dir: Path = field(
-        default_factory=lambda: Path(os.environ.get("CHARON_EXECUTABLE_PATH", "/opt/charon/bin"))
+        default_factory=lambda: Path(
+            os.environ.get("CHARON_EXECUTABLE_PATH", "/opt/charon/bin")
+        )
     )
     python: str = "python3"
     timeout_s: float = 6 * 3600
@@ -73,13 +76,17 @@ def run_deck(deck_file: str, *, cwd: Path, exe: CharonExe = CharonExe()) -> RunL
                        cwd=cwd, capture_output=True, text=True, timeout=exe.timeout_s)  # fmt: skip
     interp = r.stdout + r.stderr
     if r.returncode != 0 or not (cwd / f"{deck_file}.xml").is_file():
-        raise CharonError(f"charonInterpreter.py failed on {deck_file} ({r.returncode})", interp)
+        raise CharonError(
+            f"charonInterpreter.py failed on {deck_file} ({r.returncode})", interp
+        )
     r = subprocess.run([str(exe.solver), f"--i={deck_file}.xml", "--current"], cwd=cwd,
                        capture_output=True, text=True, timeout=exe.timeout_s)  # fmt: skip
     log = r.stdout + r.stderr
     (cwd / f"{deck_file}.log").write_text(log, encoding="utf-8")
     if "Charon run completed." not in log:
-        fails = re.findall(r"Value of continuation parameter at failed step = (\S+)", log)
+        fails = re.findall(
+            r"Value of continuation parameter at failed step = (\S+)", log
+        )
         raise CharonError(
             f"charon_mp.exe failed on {deck_file} (exit {r.returncode}"
             + (f"; LOCA failed at {fails[0]} V" if fails else "") + ")", log)  # fmt: skip
@@ -87,8 +94,10 @@ def run_deck(deck_file: str, *, cwd: Path, exe: CharonExe = CharonExe()) -> RunL
 
 
 def newton_steps(log: str) -> list[StepInfo]:
-    """Per converged solve of the log (a steady state, or each LOCA step): its iterations and
-    the final F-norm and WRMS norm of its status test."""
+    """Per converged solve of the log: its iterations and its final F-norm and WRMS norm.
+
+    A solve is a steady state or one LOCA step.
+    """
     out = []
     blocks = log.split("-- Final Status Test Results --")
     for i, block in enumerate(blocks[1:]):
