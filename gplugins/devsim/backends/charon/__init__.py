@@ -144,6 +144,10 @@ class CharonDevice:
     #: The B6 checks of the last sweep: per side, the largest oxide-flux spread and the largest
     #: poly and body charge mismatches (relative).
     checks: dict = field(default_factory=dict)
+    #: The Newton solves of the last sweep at each grid point: per side, one
+    #: ``{"iterations", "f_norm", "wrms"}`` per point (the achieved convergence, against
+    #: :attr:`tolerances`).
+    newton: dict = field(default_factory=dict)
 
     @property
     def equilibrium_file(self) -> str:
@@ -301,6 +305,13 @@ def run_cv_sweep(
         sides["sweep_plus"],
     )
     device.checks = {"sweep_minus": chk_lo, "sweep_plus": chk_hi}
+    device.newton = {
+        side: [
+            {"iterations": i.iterations, "f_norm": i.f_norm, "wrms": i.wrms}
+            for i in info
+        ]
+        for side, info in (("sweep_minus", info_lo), ("sweep_plus", info_hi))
+    }
     cgg = central_difference(q_lo, q_hi, dv)
     points = [
         PointInfo(

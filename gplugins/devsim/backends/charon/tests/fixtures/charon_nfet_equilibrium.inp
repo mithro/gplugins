@@ -77,8 +77,8 @@ start solver block
     maximum number nonlinear iterations = 50
     verbosity level is high
     start nonlinear solver wrms block
-      relative tolerance = 1e-10
-      absolute tolerance = 1e-12
+      relative tolerance = 1e-09
+      absolute tolerance = 1e-11
     end nonlinear solver wrms block
   end tpetra block
 end solver block

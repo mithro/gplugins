@@ -314,7 +314,7 @@ def test_strip_width_independent(tmp_path, monkeypatch):
     monkeypatch.setattr(exodus.strip_of, "__defaults__", (2.0,))
     b = _sweep(coarse_stack(), vg, tmp_path, "w2")
     rel = np.max(np.abs(np.asarray(b.cgg) / np.asarray(a.cgg) - 1))
-    # the Newton noise of the two independent solves (WRMS 1e-10) is about 1e-9 relative in C
+    # the Newton noise of the two independent solves (WRMS 1e-9) is about 1e-9 relative in C
     # (gf180-tcad experiment B7), so equality to 1e-12 is not attainable; the strip width
     # enters only through the side sets' length and cancels in the per-area flux
     assert rel < 1e-8, rel
@@ -430,6 +430,20 @@ def test_charge_checks_b6(tmp_path):
         assert chk["oxide_flux_spread"] < charon.FLUX_SPREAD_MAX, chk
         assert set(chk["charge_mismatch"]) == {"gate_poly", "body"}
         assert max(chk["charge_mismatch"].values()) < charon.CHARGE_MISMATCH_MAX, chk
+    # the achieved convergence at every grid point, against the deck's tolerances
+    for side in ("sweep_minus", "sweep_plus"):
+        pts = dev.newton[side]
+        assert len(pts) == 3, side
+        assert all(p["iterations"] > 0 and p["wrms"] < 1 and p["f_norm"] is not None
+                   for p in pts), pts  # fmt: skip
+
+
+def test_default_tolerances_are_b7s():
+    """WRMS 1e-9/1e-11 (gf180-tcad experiment B7), written into every deck."""
+    t = deck_mod.Tolerances()
+    assert (t.rel, t.abs) == (1e-9, 1e-11)
+    d = _deck()
+    assert "relative tolerance = 1e-09" in d and "absolute tolerance = 1e-11" in d
 
 
 @needs_charon

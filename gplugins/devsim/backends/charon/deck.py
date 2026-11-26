@@ -71,10 +71,15 @@ class NotComparable(ValueError):
 
 @dataclass(frozen=True)
 class Tolerances:
-    """Newton WRMS tolerances, iterations and the linear-solver tolerance of the deck."""
+    """Newton WRMS tolerances, iterations and the linear-solver tolerance of the deck.
 
-    rel: float = 1e-10
-    abs: float = 1e-12
+    WRMS relative 1e-9, absolute 1e-11 (gf180-tcad experiment B7): wherever 1e-10/1e-12
+    converges, the C at 1e-9/1e-11 equals it within about 1e-9 relative, and 1e-10 stalls at
+    one bias of the pfet start values (0.569 V) where 1e-9 passes.
+    """
+
+    rel: float = 1e-9
+    abs: float = 1e-11
     max_iterations: int = 50
     linear: float = 1e-12
 
