@@ -32,6 +32,7 @@ from gplugins.devsim.device_description import (
     Mesh1D,
     Stack1D,
 )
+from gplugins.devsim.results import CVConvergenceError
 
 netCDF4 = pytest.importorskip("netCDF4")
 
@@ -497,3 +498,71 @@ def test_decks_select_klu2_and_turn_rescue_off(tmp_path):
         ), x
     for lg in logs:
         assert "Starting iterations with Belos" not in lg.read_text(), lg
+
+
+def test_failed_index_is_the_grid_point_being_stepped_to():
+    up = np.array([0.0, 0.1, 0.2, 0.3])
+    assert charon._failed_index(up, 0.199999) == 2
+    assert charon._failed_index(up, 0.15) == 2
+    assert charon._failed_index(up, -0.05) == 0  # on the ramp to the first point
+    assert charon._failed_index(up[::-1].copy(), 0.15) == 2  # a descending sweep
+
+
+def test_point_without_a_wrms_norm_raises():
+    """A WRMS norm that did not parse is an error, never a rel_error of 0."""
+    ok = charon.StepInfo(3, 1e-9, 0.5)
+    with pytest.raises(charon.OutputError, match="no WRMS norm"):
+        charon._point(ok, charon.StepInfo(3, 1e-9, None))
+    assert charon._point(ok, charon.StepInfo(4, 1e-9, 0.25)).rel_error == 0.5
+
+
+def test_loca_failure_names_the_grid_point(tmp_path, monkeypatch):
+    """A LOCA failure is reported at the grid point it was stepping to.
+
+    Failing at 0.199 V on the minus side (vg - 1 mV) names vg = 0.2 V (index 2), not vg[0].
+    """
+    monkeypatch.delenv("CHARON_EXECUTABLE", raising=False)
+    exe = _fake_exe(
+        tmp_path,
+        """case "$*" in
+  *_ramp*) echo 'Charon run completed.' ;;
+  *) echo 'Value of continuation parameter at failed step = 1.990e-01 from 9.900e-02'; exit 14 ;;
+esac""",
+    )
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    dev = charon.CharonDevice(nfet_stack(), wd, exodus.strip_of(nfet_stack()), exe=exe)
+    with pytest.raises(CVConvergenceError) as e:
+        charon.run_cv_sweep(dev, CVSweep("gate", (0.0, 0.1, 0.2, 0.3), "qs"))
+    assert e.value.points == [0.2]
+    assert e.value.reasons[0][:2] == (2, 0.2)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [deck_mod.NotComparable("not comparable"), charon.OutputError("misaligned"),
+     charon.CharonError("timed out", "log")],
+)  # fmt: skip
+def test_refusals_and_wrong_results_propagate(tmp_path, monkeypatch, error):
+    """Refusals, wrong results and run failures without a bias propagate as themselves.
+
+    None of them is reported as a convergence failure.
+    """
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(charon, "_sweep_side", fail)
+    dev = charon.CharonDevice(nfet_stack(), tmp_path, exodus.strip_of(nfet_stack()))
+    with pytest.raises(type(error)) as e:
+        charon.run_cv_sweep(dev, CVSweep("gate", (0.0, 0.1), "qs"))
+    assert not isinstance(e.value, CVConvergenceError)
+
+
+@needs_charon
+def test_failed_charge_check_raises(tmp_path, monkeypatch):
+    """A converged sweep whose B6 checks fail raises ChargeCheckError."""
+    monkeypatch.setattr(charon, "FLUX_SPREAD_MAX", 0.0)
+    dev = charon.create_1d_device(coarse_stack(), workdir=tmp_path)
+    with pytest.raises(charon.ChargeCheckError, match="B6 charge checks failed"):
+        charon.run_cv_sweep(dev, CVSweep("gate", (-0.5, 0.0), "qs"))
