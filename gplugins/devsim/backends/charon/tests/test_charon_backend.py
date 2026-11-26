@@ -566,3 +566,29 @@ def test_failed_charge_check_raises(tmp_path, monkeypatch):
     dev = charon.create_1d_device(coarse_stack(), workdir=tmp_path)
     with pytest.raises(charon.ChargeCheckError, match="B6 charge checks failed"):
         charon.run_cv_sweep(dev, CVSweep("gate", (-0.5, 0.0), "qs"))
+
+
+@pytest.mark.parametrize(
+    ("vg", "failed_at"),
+    [(tuple(float(v) for v in range(-5, 6)), -2.0),  # ascending from -5 V: ramp 0 -> -5 V
+     (tuple(float(v) for v in range(5, -6, -1)), 2.0)],  # descending from +5 V
+)  # fmt: skip
+def test_ramp_failure_names_the_first_grid_point(tmp_path, monkeypatch, vg, failed_at):
+    """A LOCA failure on the ramp from equilibrium is reported at vg[0], index 0.
+
+    Its bias lies inside the grid, so the sweep's mapping would name a later point.
+    """
+    monkeypatch.delenv("CHARON_EXECUTABLE", raising=False)
+    exe = _fake_exe(
+        tmp_path,
+        f"""case "$*" in
+  *_ramp*) echo 'Value of continuation parameter at failed step = {failed_at:.3e} from 0.0'; exit 14 ;;
+  *) echo 'Charon run completed.' ;;
+esac""",
+    )
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    dev = charon.CharonDevice(nfet_stack(), wd, exodus.strip_of(nfet_stack()), exe=exe)
+    with pytest.raises(CVConvergenceError) as e:
+        charon.run_cv_sweep(dev, CVSweep("gate", vg, "qs"))
+    assert e.value.reasons[0][:2] == (0, vg[0])
