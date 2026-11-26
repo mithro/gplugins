@@ -8,8 +8,9 @@ holds one row per step with the contact voltages printed to nine significant dig
 **Gate charge.** On the 1D strip the oxide's Laplace equation makes the potential linear across
 every oxide interval, so the CVFEM flux through the oxide is ``eps_ox * eps0 * (psi_a - psi_b) /
 h`` on every interval; :func:`gate_charge` takes it at the poly face and returns the spread over
-the oxide intervals with it. That equals the poly's space charge and minus the body's within
-4.4e-13 relative (gf180-tcad ``docs/limitations/charon.md``, experiment B6).
+the oxide intervals with it. That equals the poly's space charge within 2.8e-13 (nfet) and 8.0e-13
+(pfet) relative, and minus the body's within 4.4e-13 and 8.1e-13 (gf180-tcad
+``docs/limitations/charon.md``, experiment B6).
 """
 
 from __future__ import annotations

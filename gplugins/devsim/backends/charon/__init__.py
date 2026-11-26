@@ -99,8 +99,8 @@ __all__ = [
 
 #: The largest LOCA step (V) of a C-V sweep: each grid step is cut into the fewest equal steps
 #: of at most this size. 10 mV (five steps per 50 mV grid step) passes the whole range on both
-#: devices (gf180-tcad experiment B2); 50 mV steps with the secant predictor stop in inversion
-#: (gf180-tcad Unit 3: the nfet at start values fails at 0.751 V).
+#: devices (gf180-tcad experiment B2); one secant step per 50 mV grid step stops in inversion
+#: (gf180-tcad ``study-nfet-tau15-secant-50mV``: at 0.552 V).
 LOCA_STEP_V = 0.01
 
 
@@ -114,7 +114,7 @@ def substeps_for(step: float) -> int:
 FLUX_SPREAD_MAX = 1e-10
 
 #: The largest relative mismatch of the poly's space charge with the gate charge, and of the
-#: body's with minus the gate charge (B6: at most 8.2e-13); a larger one fails the sweep.
+#: body's with minus the gate charge (B6: at most 8.1e-13); a larger one fails the sweep.
 CHARGE_MISMATCH_MAX = 1e-9
 
 #: The smallest LOCA step (V) of a ramp from equilibrium to a sweep's first bias.
@@ -278,7 +278,9 @@ def run_cv_sweep(
     """The quasi-static C-V of ``sweep`` on ``device`` (see the module notes).
 
     ``substeps`` LOCA steps per grid step (default :func:`substeps_for`). The sign of the gate
-    charge follows the gate: C > 0. Raises CVConvergenceError if a sweep fails.
+    charge follows the gate: C > 0. Raises CVConvergenceError if a sweep fails, and
+    ChargeCheckError if a converged sweep fails the B6 charge checks (a wrong result, not a
+    convergence failure, so it is not folded into CVConvergenceError).
     """
     if sweep.method != "qs":
         raise NotImplementedError(

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -97,7 +98,9 @@ def run_deck(deck_file: str, *, cwd: Path, exe: CharonExe = CharonExe()) -> RunL
         raise CharonError(
             f"charonInterpreter.py failed on {deck_file} ({r.returncode})", interp
         )
-    r = _run([str(exe.solver), f"--i={deck_file}.xml", "--current"], cwd=cwd,
+    # charon_mp.exe buffers stdout: an MPI_ABORT would lose the solver's last lines unbuffered
+    unbuffered = ["stdbuf", "-o0", "-e0"] if shutil.which("stdbuf") else []
+    r = _run([*unbuffered, str(exe.solver), f"--i={deck_file}.xml", "--current"], cwd=cwd,
              timeout=exe.timeout_s, what=f"charon_mp.exe on {deck_file}")  # fmt: skip
     log = r.stdout + r.stderr
     (cwd / f"{deck_file}.log").write_text(log, encoding="utf-8")
