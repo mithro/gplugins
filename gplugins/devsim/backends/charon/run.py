@@ -25,12 +25,17 @@ RESCUED = "using the step anyway"
 
 
 class CharonError(RuntimeError):
-    """A Charon run failed; ``log`` is its complete output."""
+    """A Charon run failed.
 
-    def __init__(self, message: str, log: str) -> None:
-        """``message`` and the run's complete output ``log``."""
+    ``log`` is its complete output, ``failed_at`` the bias (V) of the LOCA step that failed to
+    converge, or None when the run failed otherwise.
+    """
+
+    def __init__(self, message: str, log: str, failed_at: float | None = None) -> None:
+        """``message``, the run's complete output ``log`` and the failed step's bias."""
         super().__init__(message)
         self.log = log
+        self.failed_at = failed_at
 
 
 @dataclass(frozen=True)
@@ -98,9 +103,11 @@ def run_deck(deck_file: str, *, cwd: Path, exe: CharonExe = CharonExe()) -> RunL
         raise CharonError(
             f"charonInterpreter.py failed on {deck_file} ({r.returncode})", interp
         )
-    # charon_mp.exe buffers stdout: an MPI_ABORT would lose the solver's last lines unbuffered
-    unbuffered = ["stdbuf", "-o0", "-e0"] if shutil.which("stdbuf") else []
-    r = _run([*unbuffered, str(exe.solver), f"--i={deck_file}.xml", "--current"], cwd=cwd,
+    # charon_mp.exe buffers stdout: an MPI_ABORT would lose the solver's last lines, so it runs
+    # unbuffered under stdbuf (in the Charon image), which is required
+    if shutil.which("stdbuf") is None:
+        raise CharonError("stdbuf is required to run charon_mp.exe unbuffered", interp)
+    r = _run(["stdbuf", "-o0", "-e0", str(exe.solver), f"--i={deck_file}.xml", "--current"], cwd=cwd,
              timeout=exe.timeout_s, what=f"charon_mp.exe on {deck_file}")  # fmt: skip
     log = r.stdout + r.stderr
     (cwd / f"{deck_file}.log").write_text(log, encoding="utf-8")
@@ -113,6 +120,7 @@ def run_deck(deck_file: str, *, cwd: Path, exe: CharonExe = CharonExe()) -> RunL
             + (f"; LOCA failed at {fails[0]} V" if fails else "")
             + ")",
             log,
+            float(fails[0]) if fails else None,
         )
     if RESCUED in log:
         raise CharonError(

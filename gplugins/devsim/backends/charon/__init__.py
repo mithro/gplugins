@@ -60,6 +60,7 @@ from gplugins.devsim.backends.charon.deck import (
 )
 from gplugins.devsim.backends.charon.exodus import Mesh, strip_of, write_exodus
 from gplugins.devsim.backends.charon.parse import (
+    CURRENTS_RESOLUTION_V,
     central_difference,
     gate_charge,
     grid_states,
@@ -70,6 +71,7 @@ from gplugins.devsim.backends.charon.parse import (
 from gplugins.devsim.backends.charon.run import (
     CharonError,
     CharonExe,
+    StepInfo,
     newton_steps,
     run_deck,
 )
@@ -83,8 +85,10 @@ __all__ = [
     "SRH_LIFETIME_S",
     "ChargeCheckError",
     "CharonDevice",
+    "CharonError",
     "CharonExe",
     "NotComparable",
+    "OutputError",
     "Tolerances",
     "create_1d_device",
     "create_2d_device",
@@ -129,6 +133,14 @@ EQUILIBRIUM = "equilibrium"
 
 class ChargeCheckError(RuntimeError):
     """A sweep's charges fail the conservation checks of experiment B6."""
+
+
+class OutputError(RuntimeError):
+    """Charon's output does not match the sweep it was asked for.
+
+    A cut or misaligned sweep, or Newton records that do not cover its states: a wrong result,
+    not a convergence failure.
+    """
 
 
 @dataclass
@@ -240,7 +252,10 @@ def _sweep_side(
     head, rows = read_currents(wd / "currents-loca.dat")
     shutil.copy(wd / "currents-loca.dat", wd / f"{name}.currents.dat")
     col = head.index(f"{gate}_Voltage")
-    idx = grid_states(rows[:, col], vg, sub)
+    try:
+        idx = grid_states(rows[:, col], vg, sub)
+    except ValueError as e:
+        raise OutputError(f"{name}: {e}") from e
     states = read_states(wd / f"{name}.exo")
     xs, bnodes = stack.node_positions_um()
     i = next(k for k, layer in enumerate(stack.layers) if layer.material == "oxide")
@@ -266,10 +281,32 @@ def _sweep_side(
         raise ChargeCheckError(f"{name}: B6 charge checks failed: {checks}")
     steps = newton_steps(log.solver)
     if len(steps) < idx[-1] + 1:
-        raise CharonError(
-            f"{name}: {len(steps)} Newton records for {idx[-1] + 1} states", log.solver
+        raise OutputError(
+            f"{name}: {len(steps)} Newton records for {idx[-1] + 1} states"
         )
     return q, [steps[k] for k in idx], checks
+
+
+def _failed_index(biases: np.ndarray, failed_at: float) -> int:
+    """The index of the first grid point, in sweep order, at or past ``failed_at`` (V).
+
+    That is the point a LOCA step failing at ``failed_at`` was on its way to; a failure on the
+    ramp to the first point gives 0.
+    """
+    direction = 1.0 if len(biases) < 2 or biases[-1] >= biases[0] else -1.0
+    past = np.nonzero(direction * (biases - failed_at) >= -CURRENTS_RESOLUTION_V)[0]
+    return int(past[0]) if len(past) else len(biases) - 1
+
+
+def _point(a: StepInfo, b: StepInfo) -> PointInfo:
+    """A grid point's PointInfo from the Newton solves of its two sides.
+
+    Their iterations and the larger WRMS norm; a WRMS norm missing from the log raises
+    OutputError.
+    """
+    if a.wrms is None or b.wrms is None:
+        raise OutputError(f"a grid point's Newton record has no WRMS norm: {a}, {b}")
+    return PointInfo(True, a.iterations + b.iterations, max(a.wrms, b.wrms), math.nan)
 
 
 def run_cv_sweep(
@@ -278,9 +315,11 @@ def run_cv_sweep(
     """The quasi-static C-V of ``sweep`` on ``device`` (see the module notes).
 
     ``substeps`` LOCA steps per grid step (default :func:`substeps_for`). The sign of the gate
-    charge follows the gate: C > 0. Raises CVConvergenceError if a sweep fails, and
-    ChargeCheckError if a converged sweep fails the B6 charge checks (a wrong result, not a
-    convergence failure, so it is not folded into CVConvergenceError).
+    charge follows the gate: C > 0. Raises CVConvergenceError when a LOCA step fails, naming
+    the grid point it was stepping to; CharonError when a run fails otherwise; and, for a wrong
+    result rather than a convergence failure, ChargeCheckError (the B6 charge checks) or
+    OutputError (output that does not match the sweep). NotComparable and the other refusals
+    propagate as themselves.
     """
     if sweep.method != "qs":
         raise NotImplementedError(
@@ -297,10 +336,13 @@ def run_cv_sweep(
             sides[name] = _sweep_side(
                 device, sweep.gate, name, vg + sgn * dv, step, substeps
             )
-        except (CharonError, ValueError) as e:
-            # one entry: the sweep as a whole failed (LOCA gives up at its first failed step)
+        except CharonError as e:
+            if e.failed_at is None:
+                raise  # not a convergence failure at a bias: the run itself failed
+            # LOCA gives up at its first failed step: the grid point it was stepping to
+            k = _failed_index(vg + sgn * dv, e.failed_at)
             raise CVConvergenceError(
-                [float(vg[0])], [(0, float(vg[0]), f"{name}: {e}")]
+                [float(vg[k])], [(k, float(vg[k]), f"{name}: {e}")]
             ) from e
     (q_lo, info_lo, chk_lo), (q_hi, info_hi, chk_hi) = (
         sides["sweep_minus"],
@@ -315,15 +357,7 @@ def run_cv_sweep(
         for side, info in (("sweep_minus", info_lo), ("sweep_plus", info_hi))
     }
     cgg = central_difference(q_lo, q_hi, dv)
-    points = [
-        PointInfo(
-            True,
-            a.iterations + b.iterations,
-            max(a.wrms or 0.0, b.wrms or 0.0),
-            math.nan,
-        )
-        for a, b in zip(info_lo, info_hi, strict=True)
-    ]
+    points = [_point(a, b) for a, b in zip(info_lo, info_hi, strict=True)]
     return CVResult(vg=tuple(float(v) for v in vg), cgg=tuple(float(c) for c in cgg),
                     unit="F/cm^2", points=tuple(points), cgx={}, method="qs", freq_hz=None,
                     dv_qs=dv)  # fmt: skip
