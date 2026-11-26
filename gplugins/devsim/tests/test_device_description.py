@@ -113,7 +113,7 @@ def test_neutral_layer_imports_no_backend(module, tmp_path) -> None:
     assert res.stdout.strip() == f"ok {mod.__file__}"  # this checkout's module
 
 
-def test_charon_stub_imports_without_devsim(tmp_path) -> None:
+def test_charon_backend_imports_without_devsim(tmp_path) -> None:
     from gplugins.devsim.backends import charon
 
     res = _import_blocked("gplugins.devsim.backends.charon", CHARON_BLOCKED, tmp_path)
@@ -135,8 +135,6 @@ def test_backends_implement_the_protocol() -> None:
     assert isinstance(backend, dd_mod.Backend)
     assert isinstance(charon, dd_mod.Backend)
     assert not isinstance(dd_mod, dd_mod.Backend)  # the check is not vacuous
-    with pytest.raises(NotImplementedError, match="Charon backend is not implemented"):
-        charon.create_1d_device(None)
 
 
 # --------------------------------------------------------------------------------------------

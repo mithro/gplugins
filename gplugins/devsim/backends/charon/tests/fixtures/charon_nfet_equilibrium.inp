@@ -1,0 +1,84 @@
+Import State File m.exo
+tpetra is on
+lattice temperature = 298.15
+start output parameters
+  Output State File o.exo
+  Unscale Variables is on
+end output parameters
+start Physics Block gate_poly
+  geometry block is gate_poly
+  standard discretization type is drift diffusion cvfem
+  material model is gate_polyMaterial
+  SRH Recombination is on
+end Physics Block gate_poly
+start Physics Block oxide
+  geometry block is oxide
+  standard discretization type is laplace cvfem
+  material model is oxideMaterial
+end Physics Block oxide
+start Physics Block body
+  geometry block is body
+  standard discretization type is drift diffusion cvfem
+  material model is bodyMaterial
+  SRH Recombination is on
+end Physics Block body
+start Material Block gate_polyMaterial
+  material name is Silicon
+  relative permittivity = 11.7
+  electron affinity = 4.05
+  constant intrinsic concentration = 8265841554.853887
+  fixed mobility for electrons is 1417.0 holes is 470.5
+  start Carrier Lifetime Block
+    electron lifetime is constant = 1e-15
+    hole lifetime is constant = 1e-15
+  end Carrier Lifetime Block
+  start uniform doping named Function1
+    concentration = 1e+20
+    type is donor
+  end uniform doping named Function1
+end Material Block gate_polyMaterial
+start Material Block oxideMaterial
+  material name is SiO2
+  relative permittivity = 3.9
+end Material Block oxideMaterial
+start Material Block bodyMaterial
+  material name is Silicon
+  relative permittivity = 11.7
+  electron affinity = 4.05
+  constant intrinsic concentration = 8265841554.853887
+  fixed mobility for electrons is 1417.0 holes is 470.5
+  start Carrier Lifetime Block
+    electron lifetime is constant = 1e-15
+    hole lifetime is constant = 1e-15
+  end Carrier Lifetime Block
+  start uniform doping named Function1
+    concentration = 8.813323306821749e+16
+    type is acceptor
+  end uniform doping named Function1
+end Material Block bodyMaterial
+initial conditions for ELECTRIC_POTENTIAL in gate_poly is equilibrium potential
+initial conditions for ELECTRON_DENSITY in gate_poly is equilibrium density
+initial conditions for HOLE_DENSITY in gate_poly is equilibrium density
+initial conditions for ELECTRIC_POTENTIAL in oxide is uninitialized
+initial conditions for ELECTRIC_POTENTIAL in body is equilibrium potential
+initial conditions for ELECTRON_DENSITY in body is equilibrium density
+initial conditions for HOLE_DENSITY in body is equilibrium density
+BC is ohmic for body_contact on body fixed at 0.0
+BC is ohmic for gate on gate_poly fixed at 0.0
+Direct input "Charon->Solution Control->NOX->Direction->Newton->Stratimikos Linear Solver->Stratimikos,Linear Solver Type,string,Amesos2"
+Direct input "Charon->Solution Control->NOX->Direction->Newton->Stratimikos Linear Solver->Stratimikos,Preconditioner Type,string,None"
+Direct input "Charon->Solution Control->NOX->Direction->Newton->Stratimikos Linear Solver->Stratimikos->Linear Solver Types->Amesos2,Solver Type,string,KLU2"
+Direct input "Charon->Solution Control->NOX->Direction->Newton,Rescue Bad Newton Solve,bool,false"
+start solver block
+  start tpetra block
+    problem type is steady state
+    linear solver is belos
+    linear solver tolerance = 1e-12
+    maximum number nonlinear iterations = 50
+    verbosity level is high
+    start nonlinear solver wrms block
+      relative tolerance = 1e-09
+      absolute tolerance = 1e-11
+    end nonlinear solver wrms block
+  end tpetra block
+end solver block

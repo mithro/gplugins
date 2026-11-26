@@ -3,9 +3,9 @@
 
 **The seam.** A TCAD job is described once, as plain frozen data, and a *backend* turns that
 description into a simulation. This module holds the description and :mod:`gplugins.devsim.results`
-what a backend returns; ``gplugins.devsim.backends`` holds the backends. Today there is one,
-:mod:`gplugins.devsim.backends.devsim` (DEVSIM). A Charon backend, the package
-``gplugins.devsim.backends.charon`` (a stub so far), is to consume the same description
+what a backend returns; ``gplugins.devsim.backends`` holds the backends: DEVSIM,
+:mod:`gplugins.devsim.backends.devsim`, and Charon, the package
+``gplugins.devsim.backends.charon``, which consumes the same description for a 1D stack
 (gf180-tcad spec §12.1, https://github.com/mithro/gf180-tcad, issue #44).
 
 The description covers:

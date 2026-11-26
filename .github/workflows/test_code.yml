@@ -116,6 +116,47 @@ jobs:
             sh -c 'mkdir -p "$HOME" && exec "$@"' -- \
             python -m pytest -p no:cacheprovider gplugins/devsim -m "not tidy3d" -v
 
+  test_charon:
+    # gplugins.devsim.backends.charon runs Charon 2.2 inside the pinned gf180-tcad Charon image
+    # (the dev-HEAD TCAD image plus Charon and netCDF4), with the same `docker run` settings as
+    # test_devsim. The digest is gf180-tcad's docker/CHARON_IMAGE at gf180-tcad commit
+    # 8cf8dd322fa5f99098c03c34a6dc332fb3c4395d. The image sets OMPI_MCA_ess_singleton_isolated=1,
+    # so charon_mp.exe runs as one process without mpirun.
+    runs-on: ubuntu-latest
+    name: Test the Charon backend (gf180-tcad Charon image)
+    env:
+      CHARON_IMAGE: ghcr.io/mithro/gf180-tcad-charon@sha256:b2b981c4606c8b65113add4824c1c449d46d5a4525ad8323d7f2aafa5a7ee4af
+    steps:
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune --all --force
+          df -h /
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Pull the Charon image by digest
+        run: |
+          docker pull --quiet "$CHARON_IMAGE"
+          docker image inspect "$CHARON_IMAGE" --format 'id={{.Id}} size={{.Size}}'
+      - name: Test with pytest
+        run: |
+          docker run --rm \
+            --entrypoint "" \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --network none \
+            --read-only --tmpfs /tmp:rw,size=1g,exec \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp/home -e USER=gf180tcad -e LOGNAME=gf180tcad -e PYTHONPATH=/work/out \
+            -e OMP_NUM_THREADS=1 -e OPENBLAS_NUM_THREADS=1 -e MKL_NUM_THREADS=1 \
+            -e "NPY_DISABLE_CPU_FEATURES=X86_V3 X86_V4 AVX512_ICL AVX512_SPR" \
+            -e GF180TCAD_IN_SANDBOX=1 \
+            -v "$GITHUB_WORKSPACE:/work/out:rw" --workdir /work/out \
+            "$CHARON_IMAGE" \
+            sh -c 'mkdir -p "$HOME" && exec "$@"' -- \
+            python -m pytest -p no:cacheprovider gplugins/devsim/backends/charon -rs -v
+
   test_meep:
     runs-on: ubuntu-latest
     name: Test meep ubuntu-latest 3.11
