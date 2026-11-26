@@ -28,14 +28,21 @@ class CharonError(RuntimeError):
     """A Charon run failed.
 
     ``log`` is its complete output, ``failed_at`` the bias (V) of the LOCA step that failed to
-    converge, or None when the run failed otherwise.
+    converge, or None when the run failed otherwise, and ``deck`` the deck file that ran.
     """
 
-    def __init__(self, message: str, log: str, failed_at: float | None = None) -> None:
-        """``message``, the run's complete output ``log`` and the failed step's bias."""
+    def __init__(
+        self,
+        message: str,
+        log: str,
+        failed_at: float | None = None,
+        deck: str | None = None,
+    ) -> None:
+        """``message``, the run's complete output ``log``, the failed step's bias, the deck."""
         super().__init__(message)
         self.log = log
         self.failed_at = failed_at
+        self.deck = deck
 
 
 @dataclass(frozen=True)
@@ -121,6 +128,7 @@ def run_deck(deck_file: str, *, cwd: Path, exe: CharonExe = CharonExe()) -> RunL
             + ")",
             log,
             float(fails[0]) if fails else None,
+            deck_file,
         )
     if RESCUED in log:
         raise CharonError(

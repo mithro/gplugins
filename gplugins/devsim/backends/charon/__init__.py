@@ -121,6 +121,9 @@ FLUX_SPREAD_MAX = 1e-10
 #: body's with minus the gate charge (B6: at most 8.1e-13); a larger one fails the sweep.
 CHARGE_MISMATCH_MAX = 1e-9
 
+#: The deck file suffix of a ramp from equilibrium to a sweep's first bias.
+RAMP_SUFFIX = "_ramp.inp"
+
 #: The smallest LOCA step (V) of a ramp from equilibrium to a sweep's first bias.
 RAMP_MIN_STEP_V = 1e-4
 
@@ -236,8 +239,8 @@ def _sweep_side(
                           gate=gate, gate_bc=f"swept from 0.0 to {v0!r}",
                           problem="parameter sweep", init="exodus", sweep=ramp,
                           tolerances=dev.tolerances, quasi_static=True)  # fmt: skip
-        (wd / f"{name}_ramp.inp").write_text(deck, encoding="utf-8")
-        run_deck(f"{name}_ramp.inp", cwd=wd, exe=dev.exe)
+        (wd / f"{name}{RAMP_SUFFIX}").write_text(deck, encoding="utf-8")
+        run_deck(f"{name}{RAMP_SUFFIX}", cwd=wd, exe=dev.exe)
         start = f"{name}_ramp.exo"
     else:
         start = dev.equilibrium_file
@@ -290,8 +293,8 @@ def _sweep_side(
 def _failed_index(biases: np.ndarray, failed_at: float) -> int:
     """The index of the first grid point, in sweep order, at or past ``failed_at`` (V).
 
-    That is the point a LOCA step failing at ``failed_at`` was on its way to; a failure on the
-    ramp to the first point gives 0.
+    That is the point a LOCA step of the sweep failing at ``failed_at`` was on its way to. A
+    failure on the ramp from equilibrium is reported at the first point by the caller.
     """
     direction = 1.0 if len(biases) < 2 or biases[-1] >= biases[0] else -1.0
     past = np.nonzero(direction * (biases - failed_at) >= -CURRENTS_RESOLUTION_V)[0]
@@ -339,8 +342,10 @@ def run_cv_sweep(
         except CharonError as e:
             if e.failed_at is None:
                 raise  # not a convergence failure at a bias: the run itself failed
-            # LOCA gives up at its first failed step: the grid point it was stepping to
-            k = _failed_index(vg + sgn * dv, e.failed_at)
+            # LOCA gives up at its first failed step: on the ramp from equilibrium that is the
+            # first grid point, in the sweep the grid point it was stepping to
+            on_ramp = (e.deck or "").endswith(RAMP_SUFFIX)
+            k = 0 if on_ramp else _failed_index(vg + sgn * dv, e.failed_at)
             raise CVConvergenceError(
                 [float(vg[k])], [(k, float(vg[k]), f"{name}: {e}")]
             ) from e
