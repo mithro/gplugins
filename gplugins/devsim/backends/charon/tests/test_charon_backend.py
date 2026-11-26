@@ -353,7 +353,7 @@ def test_two_runs_byte_identical(tmp_path):
 
 @needs_charon
 def test_qs_equals_devsim_1d(tmp_path):
-    """Charon and DEVSIM on the identical 1D stack: C within 1 % at every bias."""
+    """Charon and DEVSIM on the identical 1D stack: C within 1e-4 relative at every bias."""
     from gplugins.devsim import sweep_cv
     from gplugins.devsim.stack1d import create_1d_stack
 
@@ -460,3 +460,40 @@ def test_strip_listed_by_io_info(tmp_path):
                        check=True)  # fmt: skip
     for name in ("gate_poly", "oxide", "body", "gate", "body_contact"):
         assert f"'{name}'" in r.stdout, name
+
+
+def test_2d_device_is_not_implemented():
+    with pytest.raises(NotImplementedError, match="Task E"):
+        charon.create_2d_device(None)
+
+
+def test_ac_method_is_refused(tmp_path):
+    """Only the quasi-static C-V: method="ac" raises before any deck is written."""
+    dev = charon.CharonDevice(nfet_stack(), tmp_path, exodus.strip_of(nfet_stack()))
+    with pytest.raises(NotImplementedError, match="quasi-static"):
+        charon.run_cv_sweep(dev, CVSweep("gate", (0.0, 0.05), "ac", freq_hz=1e6))
+    assert not list(tmp_path.iterdir())
+
+
+@needs_charon
+def test_decks_select_klu2_and_turn_rescue_off(tmp_path):
+    """The decks' XML selects Amesos2 KLU2 and turns NOX's rescue off.
+
+    The logs have no Belos iteration block: positive evidence of the direct solver.
+    """
+    dev = charon.create_1d_device(coarse_stack(), workdir=tmp_path)
+    charon.run_cv_sweep(dev, CVSweep("gate", (-0.5, 0.0), "qs"))
+    xmls = sorted(tmp_path.glob("*.inp.xml"))
+    logs = sorted(tmp_path.glob("*.inp.log"))
+    assert xmls and len(logs) == len(xmls), (xmls, logs)
+    for x in xmls:
+        t = x.read_text()
+        assert re.search(
+            r'name="Linear Solver Type" type="string" value="Amesos2"', t
+        ), x
+        assert re.search(r'name="Solver Type" type="string" value="KLU2"', t), x
+        assert re.search(
+            r'name="Rescue Bad Newton Solve" type="bool" value="false"', t
+        ), x
+    for lg in logs:
+        assert "Starting iterations with Belos" not in lg.read_text(), lg
